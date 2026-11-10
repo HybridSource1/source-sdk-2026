@@ -6,6 +6,12 @@
 // part of VRAD (static props, detail props, ambient cubes, incremental lighting)
 // only ever sees the stock layout. See lightmap_padding_core.h for the format.
 //-----------------------------------------------------------------------------
+// Source builds without C++ exceptions. The standard containers used here only
+// throw on out-of-memory, which ends the compile either way.
+#ifdef _MSC_VER
+#pragma warning( disable : 4530 )
+#endif
+
 // Standard library headers first: Source's min/max macros break them otherwise.
 #include "lightmap_padding_core.h"
 #include "vrad.h"

@@ -29,7 +29,7 @@ jobs:
       game: episodic
       project-group: game
       solution-name: games
-      build-on-linux: true
+      build-on-linux: false  # the Linux runner is missing the 32-bit linker
 
   shaders:
     uses: ./.github/workflows/mapbase_build-base.yml
@@ -39,7 +39,7 @@ jobs:
       game: episodic
       project-group: shaders
       solution-name: shaders
-      build-on-linux: true
+      build-on-linux: false  # the Linux runner is missing the 32-bit linker
 
   bake_helper:
     name: vrad15_bake (Windows x64)
