@@ -180,6 +180,12 @@ public:
 #ifdef MAPBASE
 	// Needed for logic_playerproxy
 	float GetFlashlightBattery();
+
+	// Survival flashlight (finite batteries, see survival_flashlight_shared.h)
+	bool				Flashlight_AddBatteries( int nCount );
+	bool				Flashlight_StartSwap( bool bTurnOnAfter );
+	int					Flashlight_GetSpareBatteries() const { return m_HL2Local.m_iSurvFlashSpares; }
+	void				Flashlight_SetCharge( float flCharge );
 #endif
 
 	// Apply a battery
@@ -248,6 +254,11 @@ public:
 	void				InputIgnoreFallDamageWithoutReset( inputdata_t &inputdata );
 	void				InputEnableFlashlight( inputdata_t &inputdata );
 	void				InputDisableFlashlight( inputdata_t &inputdata );
+#ifdef MAPBASE
+	void				InputAddFlashlightBatteries( inputdata_t &inputdata );
+	void				InputSetFlashlightBatteries( inputdata_t &inputdata );
+	void				InputSetFlashlightCharge( inputdata_t &inputdata );
+#endif
 
 #ifdef MAPBASE
 	void				InputAddArmor( inputdata_t &inputdata );
@@ -433,6 +444,11 @@ private:
 	EHANDLE				m_hPlayerProxy;
 
 	bool				m_bFlashlightDisabled;
+#ifdef MAPBASE
+	void				Flashlight_UpdateSurvival( void );
+	float				m_flSurvFlashSwapEnd;		// when the current battery swap finishes
+	bool				m_bSurvFlashOnAfterSwap;	// relight once the swap completes
+#endif
 	bool				m_bUseCappedPhysicsDamageTable;
 	
 	float				m_flArmorReductionTime;

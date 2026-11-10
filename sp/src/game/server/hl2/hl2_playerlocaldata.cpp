@@ -32,6 +32,11 @@ BEGIN_SEND_TABLE_NOBASE( CHL2PlayerLocalData, DT_HL2Local )
 	SendPropFloat( SENDINFO(m_flFlashBattery) ),
 	SendPropVector( SENDINFO(m_vecLocatorOrigin) ),
 #endif
+#ifdef MAPBASE
+	SendPropFloat( SENDINFO(m_flSurvFlashCharge), 10, SPROP_UNSIGNED | SPROP_ROUNDUP, 0.0f, 100.0f ),
+	SendPropInt( SENDINFO(m_iSurvFlashSpares), 6, SPROP_UNSIGNED ),
+	SendPropBool( SENDINFO(m_bSurvFlashSwapping) ),
+#endif
 END_SEND_TABLE()
 
 BEGIN_SIMPLE_DATADESC( CHL2PlayerLocalData )
@@ -47,6 +52,11 @@ BEGIN_SIMPLE_DATADESC( CHL2PlayerLocalData )
 #ifdef HL2_EPISODIC
 	DEFINE_FIELD( m_flFlashBattery, FIELD_FLOAT ),
 	DEFINE_FIELD( m_vecLocatorOrigin, FIELD_POSITION_VECTOR ),
+#endif
+#ifdef MAPBASE
+	DEFINE_FIELD( m_flSurvFlashCharge, FIELD_FLOAT ),
+	DEFINE_FIELD( m_iSurvFlashSpares, FIELD_INTEGER ),
+	DEFINE_FIELD( m_bSurvFlashSwapping, FIELD_BOOLEAN ),
 #endif
 	// Ladder related stuff
 	DEFINE_FIELD( m_hLadder, FIELD_EHANDLE ),
@@ -64,6 +74,11 @@ CHL2PlayerLocalData::CHL2PlayerLocalData()
 	m_bDisplayReticle = false;
 #ifdef HL2_EPISODIC
 	m_flFlashBattery = 0.0f;
+#endif
+#ifdef MAPBASE
+	m_flSurvFlashCharge = 100.0f;
+	m_iSurvFlashSpares = 0;
+	m_bSurvFlashSwapping = false;
 #endif
 }
 

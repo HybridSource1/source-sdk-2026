@@ -61,6 +61,10 @@
 #include "mapbase/protagonist_system.h"
 #endif
 
+#ifdef MAPBASE
+#include "mapbase/survival_flashlight_shared.h"
+#endif
+
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
@@ -89,9 +93,16 @@ extern int gEvilImpulse101;
 
 ConVar sv_autojump( "sv_autojump", "0" );
 
+#ifdef MAPBASE
+// Survival feel: slower, more deliberate pacing (stock: 150 / 190 / 320).
+ConVar hl2_walkspeed( "hl2_walkspeed", "95" );
+ConVar hl2_normspeed( "hl2_normspeed", "140" );
+ConVar hl2_sprintspeed( "hl2_sprintspeed", "215" );
+#else
 ConVar hl2_walkspeed( "hl2_walkspeed", "150" );
 ConVar hl2_normspeed( "hl2_normspeed", "190" );
 ConVar hl2_sprintspeed( "hl2_sprintspeed", "320" );
+#endif
 
 ConVar hl2_darkness_flashlight_factor ( "hl2_darkness_flashlight_factor", "1" );
 
@@ -210,6 +221,16 @@ bool Flashlight_UseLegacyVersion( void )
 
 	// Return the results
 	return g_bUseLegacyFlashlight;
+}
+
+// The suit-power flashlight path is bypassed when survival batteries are on.
+static bool Flashlight_UsesSuitPower( void )
+{
+#ifdef MAPBASE
+	if ( SurvivalFlashlight_IsEnabled() )
+		return false;
+#endif
+	return Flashlight_UseLegacyVersion();
 }
 
 //-----------------------------------------------------------------------------
@@ -557,6 +578,10 @@ BEGIN_DATADESC( CHL2_Player )
 	DEFINE_FIELD( m_flNextFlashlightCheckTime, FIELD_TIME ),
 	DEFINE_FIELD( m_flFlashlightPowerDrainScale, FIELD_FLOAT ),
 	DEFINE_FIELD( m_bFlashlightDisabled, FIELD_BOOLEAN ),
+#ifdef MAPBASE
+	DEFINE_FIELD( m_flSurvFlashSwapEnd, FIELD_TIME ),
+	DEFINE_FIELD( m_bSurvFlashOnAfterSwap, FIELD_BOOLEAN ),
+#endif
 
 	DEFINE_FIELD( m_bUseCappedPhysicsDamageTable, FIELD_BOOLEAN ),
 
@@ -574,6 +599,11 @@ BEGIN_DATADESC( CHL2_Player )
 #endif
 	DEFINE_INPUTFUNC( FIELD_VOID, "DisableFlashlight", InputDisableFlashlight ),
 	DEFINE_INPUTFUNC( FIELD_VOID, "EnableFlashlight", InputEnableFlashlight ),
+#ifdef MAPBASE
+	DEFINE_INPUTFUNC( FIELD_INTEGER, "AddFlashlightBatteries", InputAddFlashlightBatteries ),
+	DEFINE_INPUTFUNC( FIELD_INTEGER, "SetFlashlightBatteries", InputSetFlashlightBatteries ),
+	DEFINE_INPUTFUNC( FIELD_FLOAT, "SetFlashlightCharge", InputSetFlashlightCharge ),
+#endif
 	DEFINE_INPUTFUNC( FIELD_VOID, "ForceDropPhysObjects", InputForceDropPhysObjects ),
 #ifdef MAPBASE
 	DEFINE_INPUTFUNC( FIELD_VOID, "SquadForceSummon", InputSquadForceSummon ),
@@ -707,6 +737,11 @@ void CHL2_Player::Precache( void )
 	PrecacheScriptSound( "HL2Player.UseDeny" );
 	PrecacheScriptSound( "HL2Player.FlashLightOn" );
 	PrecacheScriptSound( "HL2Player.FlashLightOff" );
+#ifdef MAPBASE
+	PrecacheScriptSound( "SurvivalFlashlight.Empty" );
+	PrecacheScriptSound( "SurvivalFlashlight.Swap" );
+	PrecacheScriptSound( "SurvivalFlashlight.Die" );
+#endif
 	PrecacheScriptSound( "HL2Player.PickupWeapon" );
 	PrecacheScriptSound( "HL2Player.TrainUse" );
 	PrecacheScriptSound( "HL2Player.Use" );
@@ -1586,6 +1621,14 @@ void CHL2_Player::Spawn(void)
 #ifdef HL2_EPISODIC
 	m_HL2Local.m_flFlashBattery = 100.0f;
 #endif 
+#ifdef MAPBASE
+	// Fresh spawn only; a restored save overwrites these.
+	m_HL2Local.m_flSurvFlashCharge = 100.0f;
+	m_HL2Local.m_iSurvFlashSpares = sv_surv_flashlight_start_spares.GetInt();
+	m_HL2Local.m_bSurvFlashSwapping = false;
+	m_flSurvFlashSwapEnd = 0.0f;
+	m_bSurvFlashOnAfterSwap = false;
+#endif
 
 	GetPlayerProxy();
 
@@ -2428,7 +2471,7 @@ void CHL2_Player::SuitPower_Update( void )
 				StopSprinting();
 			}
 
-			if ( Flashlight_UseLegacyVersion() )
+			if ( Flashlight_UsesSuitPower() )
 			{
 				if( FlashlightIsOn() )
 				{
@@ -2439,7 +2482,7 @@ void CHL2_Player::SuitPower_Update( void )
 			}
 		}
 
-		if ( Flashlight_UseLegacyVersion() )
+		if ( Flashlight_UsesSuitPower() )
 		{
 			// turn off flashlight a little bit after it hits below one aux power notch (5%)
 			if( m_HL2Local.m_flSuitPower < 4.8f && FlashlightIsOn() )
@@ -2634,15 +2677,40 @@ void CHL2_Player::FlashlightTurnOn( void )
 	if( m_bFlashlightDisabled )
 		return;
 
-	if ( Flashlight_UseLegacyVersion() )
+#ifdef MAPBASE
+	if ( SurvivalFlashlight_IsEnabled() )
 	{
-		if( !SuitPower_AddDevice( SuitDeviceFlashlight ) )
+		if ( sv_surv_flashlight_needsuit.GetBool() && !IsSuitEquipped() )
 			return;
+
+		// Mid-swap: just remember the player wants light afterwards.
+		if ( m_HL2Local.m_bSurvFlashSwapping )
+		{
+			m_bSurvFlashOnAfterSwap = true;
+			return;
+		}
+
+		// Dead battery: swap if we can, otherwise click uselessly.
+		if ( m_HL2Local.m_flSurvFlashCharge <= 0.0f )
+		{
+			if ( !Flashlight_StartSwap( true ) )
+				EmitSound( "SurvivalFlashlight.Empty" );
+			return;
+		}
 	}
-#ifdef HL2_DLL
-	if( !IsSuitEquipped() )
-		return;
+	else
 #endif
+	{
+		if ( Flashlight_UseLegacyVersion() )
+		{
+			if( !SuitPower_AddDevice( SuitDeviceFlashlight ) )
+				return;
+		}
+#ifdef HL2_DLL
+		if( !IsSuitEquipped() )
+			return;
+#endif
+	}
 
 	AddEffects( EF_DIMLIGHT );
 	EmitSound( "HL2Player.FlashLightOn" );
@@ -2657,7 +2725,7 @@ void CHL2_Player::FlashlightTurnOn( void )
 //-----------------------------------------------------------------------------
 void CHL2_Player::FlashlightTurnOff( void )
 {
-	if ( Flashlight_UseLegacyVersion() )
+	if ( Flashlight_UsesSuitPower() )
 	{
 		if( !SuitPower_RemoveDevice( SuitDeviceFlashlight ) )
 			return;
@@ -4015,7 +4083,18 @@ void CHL2_Player::UpdateClientData( void )
 	}
 
 	// Update Flashlight
+#ifdef MAPBASE
+	Flashlight_UpdateSurvival();
+#endif
 #ifdef HL2_EPISODIC
+#ifdef MAPBASE
+	if ( SurvivalFlashlight_IsEnabled() )
+	{
+		// Keep the EP2 recharging battery out of the way.
+		m_HL2Local.m_flFlashBattery = -1.0f;
+	}
+	else
+#endif
 	if ( Flashlight_UseLegacyVersion() == false )
 	{
 		if ( FlashlightIsOn() && sv_infinite_aux_power.GetBool() == false )
@@ -5029,6 +5108,9 @@ void CLogicPlayerProxy::InputRequestPlayerFlashBattery( inputdata_t &inputdata )
 // Note that this is on CHL2_Player, not CLogicPlayerProxy.
 float CHL2_Player::GetFlashlightBattery()
 {
+	if ( SurvivalFlashlight_IsEnabled() )
+		return m_HL2Local.m_flSurvFlashCharge;
+
 #ifdef HL2_EPISODIC
 	return Flashlight_UseLegacyVersion() ? SuitPower_GetCurrentPercentage() : m_HL2Local.m_flFlashBattery;
 #else
@@ -5310,3 +5392,167 @@ void CLogicPlayerProxy::InputSetPlayerDrawExternally( inputdata_t &inputdata )
 	pPlayer->SetDrawPlayerModelExternally( inputdata.value.Bool() );
 }
 #endif
+
+#ifdef MAPBASE
+//=============================================================================
+// Survival flashlight
+//=============================================================================
+
+//-----------------------------------------------------------------------------
+// Purpose: Per-frame drain, swap timing and battery death.
+//-----------------------------------------------------------------------------
+void CHL2_Player::Flashlight_UpdateSurvival( void )
+{
+	if ( !SurvivalFlashlight_IsEnabled() )
+	{
+		m_HL2Local.m_bSurvFlashSwapping = false;
+		return;
+	}
+
+	// Battery swap in progress
+	if ( m_HL2Local.m_bSurvFlashSwapping )
+	{
+		if ( gpGlobals->curtime >= m_flSurvFlashSwapEnd )
+		{
+			m_HL2Local.m_bSurvFlashSwapping = false;
+			m_HL2Local.m_flSurvFlashCharge = 100.0f;
+
+			if ( m_bSurvFlashOnAfterSwap && IsAlive() && !FlashlightIsOn() )
+			{
+				m_bSurvFlashOnAfterSwap = false;
+				FlashlightTurnOn();
+			}
+			m_bSurvFlashOnAfterSwap = false;
+		}
+		return;
+	}
+
+	float dt = gpGlobals->frametime;
+	float flCharge = m_HL2Local.m_flSurvFlashCharge;
+
+	if ( FlashlightIsOn() )
+	{
+		if ( sv_infinite_aux_power.GetBool() )
+			return;
+
+		float flLife = MAX( sv_surv_flashlight_life.GetFloat(), 1.0f );
+		float flDrain = ( 100.0f / flLife ) * dt;
+
+		// Honour logic_playerproxy SetFlashlightSlowDrain
+		if ( m_flFlashlightPowerDrainScale > 0.0f )
+			flDrain /= m_flFlashlightPowerDrainScale;
+
+		flCharge -= flDrain;
+		if ( flCharge <= 0.0f )
+		{
+			flCharge = 0.0f;
+
+			// The bulb dies on its own - no switch click.
+			RemoveEffects( EF_DIMLIGHT );
+			EmitSound( "SurvivalFlashlight.Die" );
+
+			variant_t flashlightoff;
+			flashlightoff.SetFloat( 0.0f );
+			FirePlayerProxyOutput( "OnFlashlightOff", flashlightoff, this, this );
+		}
+	}
+	else if ( sv_surv_flashlight_recharge.GetFloat() > 0.0f )
+	{
+		flCharge = MIN( flCharge + sv_surv_flashlight_recharge.GetFloat() * dt, 100.0f );
+	}
+
+	m_HL2Local.m_flSurvFlashCharge = flCharge;
+}
+
+//-----------------------------------------------------------------------------
+// Purpose: Discard the current battery and load a spare.
+//-----------------------------------------------------------------------------
+bool CHL2_Player::Flashlight_StartSwap( bool bTurnOnAfter )
+{
+	if ( !SurvivalFlashlight_IsEnabled() || !IsAlive() || m_bFlashlightDisabled )
+		return false;
+
+	if ( m_HL2Local.m_bSurvFlashSwapping || m_HL2Local.m_iSurvFlashSpares <= 0 )
+		return false;
+
+	// Nothing to gain from swapping out a full battery.
+	if ( m_HL2Local.m_flSurvFlashCharge >= 100.0f )
+		return false;
+
+	if ( sv_surv_flashlight_needsuit.GetBool() && !IsSuitEquipped() )
+		return false;
+
+	bool bWasOn = FlashlightIsOn() != 0;
+	if ( bWasOn )
+		RemoveEffects( EF_DIMLIGHT );	// dark while the battery is out
+
+	m_HL2Local.m_iSurvFlashSpares = m_HL2Local.m_iSurvFlashSpares - 1;
+	m_HL2Local.m_flSurvFlashCharge = 0.0f;	// the old battery is thrown away
+	m_HL2Local.m_bSurvFlashSwapping = true;
+	m_flSurvFlashSwapEnd = gpGlobals->curtime + MAX( sv_surv_flashlight_swap_time.GetFloat(), 0.0f );
+	m_bSurvFlashOnAfterSwap = bTurnOnAfter || bWasOn;
+
+	EmitSound( "SurvivalFlashlight.Swap" );
+	return true;
+}
+
+//-----------------------------------------------------------------------------
+// Purpose: Pick up spare batteries. Returns false if the player is full.
+//-----------------------------------------------------------------------------
+bool CHL2_Player::Flashlight_AddBatteries( int nCount )
+{
+	if ( nCount <= 0 )
+		return false;
+
+	int nMax = MAX( sv_surv_flashlight_max_spares.GetInt(), 0 );
+	if ( m_HL2Local.m_iSurvFlashSpares >= nMax )
+		return false;
+
+	m_HL2Local.m_iSurvFlashSpares = MIN( m_HL2Local.m_iSurvFlashSpares + nCount, nMax );
+	return true;
+}
+
+//-----------------------------------------------------------------------------
+void CHL2_Player::Flashlight_SetCharge( float flCharge )
+{
+	m_HL2Local.m_flSurvFlashCharge = clamp( flCharge, 0.0f, 100.0f );
+
+	if ( m_HL2Local.m_flSurvFlashCharge <= 0.0f && FlashlightIsOn() )
+		FlashlightTurnOff();
+}
+
+//-----------------------------------------------------------------------------
+// Inputs (fire at !player)
+//-----------------------------------------------------------------------------
+void CHL2_Player::InputAddFlashlightBatteries( inputdata_t &inputdata )
+{
+	Flashlight_AddBatteries( inputdata.value.Int() );
+}
+
+void CHL2_Player::InputSetFlashlightBatteries( inputdata_t &inputdata )
+{
+	m_HL2Local.m_iSurvFlashSpares = clamp( inputdata.value.Int(), 0, 63 );
+}
+
+void CHL2_Player::InputSetFlashlightCharge( inputdata_t &inputdata )
+{
+	Flashlight_SetCharge( inputdata.value.Float() );
+}
+
+//-----------------------------------------------------------------------------
+// Console: bind a key to "flashlight_swap" for a manual battery change.
+//-----------------------------------------------------------------------------
+CON_COMMAND( flashlight_swap, "Swap in a spare flashlight battery (discards the current one)." )
+{
+	CBasePlayer *pBasePlayer = UTIL_GetCommandClient();
+	if ( !pBasePlayer && gpGlobals->maxClients == 1 )
+		pBasePlayer = UTIL_GetLocalPlayer();
+
+	CHL2_Player *pPlayer = dynamic_cast<CHL2_Player*>( pBasePlayer );
+	if ( !pPlayer || !pPlayer->IsAlive() )
+		return;
+
+	if ( !pPlayer->Flashlight_StartSwap( false ) )
+		pPlayer->EmitSound( "HL2Player.UseDeny" );
+}
+#endif // MAPBASE

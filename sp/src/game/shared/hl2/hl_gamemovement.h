@@ -47,6 +47,16 @@ public:
 	virtual unsigned int PlayerSolidMask( bool brushOnly = false );
 
 #ifdef MAPBASE
+	// Survival feel: weighty acceleration, directional speed penalties,
+	// grounded jumps and landing stagger. See sv_surv_* convars.
+	virtual void	CheckParameters( void );
+	virtual void	Accelerate( Vector& wishdir, float wishspeed, float accel );
+	virtual void	AirAccelerate( Vector& wishdir, float wishspeed, float accel );
+	virtual bool	CheckJumpButton( void );
+	virtual void	CheckFalling( void );
+#endif
+
+#ifdef MAPBASE
 	// Called by mappers who need a player to be on a ladder.
 	bool		ForcePlayerOntoLadder(CFuncLadder *ladder);
 	// Called by mappers who want a player to be on a ladder.

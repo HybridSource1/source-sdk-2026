@@ -45,6 +45,11 @@ public:
 	float	m_flFlashBattery;
 	Vector	m_vecLocatorOrigin;
 #endif
+#ifdef MAPBASE
+	float	m_flSurvFlashCharge;
+	int		m_iSurvFlashSpares;
+	bool	m_bSurvFlashSwapping;
+#endif
 
 	// Ladder related data
 	EHANDLE			m_hLadder;

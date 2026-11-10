@@ -12,6 +12,10 @@
 
 #include "hl2_player_shared.h"
 
+#if defined( CLIENT_DLL ) && defined( MAPBASE )
+#include "mapbase/survival_feel.h"
+#endif
+
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
@@ -341,6 +345,12 @@ float CBaseHLCombatWeapon::CalcViewmodelBob( void )
 //-----------------------------------------------------------------------------
 void CBaseHLCombatWeapon::AddViewmodelBob( CBaseViewModel *viewmodel, Vector &origin, QAngle &angles )
 {
+#ifdef MAPBASE
+	// The survival feel layer applies its own gait bob in CalcViewModelLag.
+	if ( SurvivalFeel::IsEnabled() )
+		return;
+#endif
+
 	Vector	forward, right;
 	AngleVectors( angles, &forward, &right, NULL );
 

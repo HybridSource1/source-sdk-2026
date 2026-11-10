@@ -53,6 +53,10 @@
 
 // NVNT haptic utils
 #include "haptics/haptic_utils.h"
+#if defined( CLIENT_DLL ) && defined( MAPBASE )
+#include "mapbase/survival_feel.h"
+#endif
+
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
@@ -1653,6 +1657,14 @@ void CBasePlayer::CalcPlayerView( Vector& eyeOrigin, QAngle& eyeAngles, float& f
 	Vector vecBaseEyePosition = eyeOrigin;
 
 	CalcViewRoll( eyeAngles );
+
+#if defined( CLIENT_DLL ) && defined( MAPBASE )
+	if ( !prediction->InPrediction() )
+	{
+		// Survival feel: footstep bob, strafe lean, landing dip, breathing.
+		SurvivalFeel::ApplyCamera( this, eyeOrigin, eyeAngles );
+	}
+#endif
 
 	// Apply punch angle
 	VectorAdd( eyeAngles, m_Local.m_vecPunchAngle, eyeAngles );

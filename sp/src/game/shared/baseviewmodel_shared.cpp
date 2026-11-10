@@ -27,6 +27,10 @@ extern ConVar in_forceuser;
 #include "iclientmode.h"
 #endif
 
+#if defined( CLIENT_DLL ) && defined( MAPBASE )
+#include "mapbase/survival_feel.h"
+#endif
+
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
@@ -517,6 +521,18 @@ float g_fMaxViewModelLag = 1.5f;
 
 void CBaseViewModel::CalcViewModelLag( Vector& origin, QAngle& angles, QAngle& original_angles )
 {
+#if defined( CLIENT_DLL ) && defined( MAPBASE )
+	if ( SurvivalFeel::IsEnabled() )
+	{
+		// Keep the stock lag state in sync so toggling the feature off doesn't pop.
+		AngleVectors( original_angles, &m_vecLastFacing );
+
+		// Spring-based, weight-aware sway replaces the stock linear drift.
+		SurvivalFeel::ApplyViewModel( this, m_hWeapon.Get(), origin, angles, original_angles );
+		return;
+	}
+#endif
+
 	Vector vOriginalOrigin = origin;
 	QAngle vOriginalAngles = angles;
 
