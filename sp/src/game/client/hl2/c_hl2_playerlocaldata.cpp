@@ -29,6 +29,11 @@ BEGIN_RECV_TABLE_NOBASE( C_HL2PlayerLocalData, DT_HL2Local )
 	RecvPropFloat( RECVINFO(m_flFlashBattery) ),
 	RecvPropVector( RECVINFO(m_vecLocatorOrigin) ),
 #endif
+#ifdef MAPBASE
+	RecvPropFloat( RECVINFO(m_flSurvFlashCharge) ),
+	RecvPropInt( RECVINFO(m_iSurvFlashSpares) ),
+	RecvPropBool( RECVINFO(m_bSurvFlashSwapping) ),
+#endif
 END_RECV_TABLE()
 
 BEGIN_PREDICTION_DATA_NO_BASE( C_HL2PlayerLocalData )
@@ -47,6 +52,11 @@ C_HL2PlayerLocalData::C_HL2PlayerLocalData()
 #ifdef HL2_EPISODIC
 	m_flFlashBattery = 0.0f;
 	m_vecLocatorOrigin = vec3_origin;
+#endif
+#ifdef MAPBASE
+	m_flSurvFlashCharge = 100.0f;
+	m_iSurvFlashSpares = 0;
+	m_bSurvFlashSwapping = false;
 #endif
 }
 

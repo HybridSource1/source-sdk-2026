@@ -25,6 +25,11 @@ extern ConVar r_flashlightdepthres;
 extern ConVar r_flashlightdepthres;
 #endif
 
+#if defined( MAPBASE ) && defined( HL2_CLIENT_DLL )
+#include "mapbase/survival_flashlight_shared.h"
+#include "mapbase/survival_feel.h"
+#endif
+
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
@@ -279,10 +284,32 @@ void CFlashlightEffect::UpdateLightNew(const Vector &vecPos, const Vector &vecFo
 	state.m_fQuadraticAtten = r_flashlightquadratic.GetFloat();
 
 	bool bFlicker = false;
+	Vector vecTint( 1.0f, 1.0f, 1.0f );
+
+#if defined( MAPBASE ) && defined( HL2_CLIENT_DLL )
+	// Survival flashlight: dims, warms and cuts out as the battery dies.
+	if ( SurvivalFlashlight_IsEnabled() )
+	{
+		C_BaseHLPlayer *pSurvPlayer = (C_BaseHLPlayer *)C_BasePlayer::GetLocalPlayer();
+		if ( pSurvPlayer && pSurvPlayer->entindex() == m_nEntIndex )
+		{
+			SurvivalFlashlightLook_t look;
+			SurvivalFlashlight_GetLook( pSurvPlayer->m_HL2Local.m_flSurvFlashCharge, gpGlobals->curtime, look );
+
+			float flBrightness = look.flBrightness * SurvivalFeel::GetFlashlightWarmup();
+
+			state.m_fLinearAtten = r_flashlightlinear.GetFloat() * flBrightness;
+			state.m_fHorizontalFOVDegrees = r_flashlightfov.GetFloat() - look.flFOVLoss;
+			state.m_fVerticalFOVDegrees = r_flashlightfov.GetFloat() - look.flFOVLoss;
+			vecTint = look.vecTint;
+			bFlicker = true;
+		}
+	}
+#endif
 
 #ifdef HL2_EPISODIC
 	C_BaseHLPlayer *pPlayer = (C_BaseHLPlayer *)C_BasePlayer::GetLocalPlayer();
-	if ( pPlayer )
+	if ( pPlayer && !bFlicker )
 	{
 		float flBatteryPower = ( pPlayer->m_HL2Local.m_flFlashBattery >= 0.0f ) ? ( pPlayer->m_HL2Local.m_flFlashBattery ) : pPlayer->m_HL2Local.m_flSuitPower;
 		if ( flBatteryPower <= 10.0f )
@@ -336,9 +363,9 @@ void CFlashlightEffect::UpdateLightNew(const Vector &vecPos, const Vector &vecFo
 	}
 
 	state.m_fConstantAtten = r_flashlightconstant.GetFloat();
-	state.m_Color[0] = 1.0f;
-	state.m_Color[1] = 1.0f;
-	state.m_Color[2] = 1.0f;
+	state.m_Color[0] = vecTint.x;
+	state.m_Color[1] = vecTint.y;
+	state.m_Color[2] = vecTint.z;
 	state.m_Color[3] = r_flashlightambient.GetFloat();
 	state.m_NearZ = r_flashlightnear.GetFloat() + m_flDistMod;	// Push near plane out so that we don't clip the world when the flashlight pulls back 
 	state.m_FarZ = r_flashlightfar.GetFloat();

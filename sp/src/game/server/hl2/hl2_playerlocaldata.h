@@ -44,6 +44,12 @@ public:
 	CNetworkVar( float, m_flFlashBattery );
 	CNetworkVar( Vector, m_vecLocatorOrigin );
 #endif
+#ifdef MAPBASE
+	// Survival flashlight (see survival_flashlight_shared.h)
+	CNetworkVar( float, m_flSurvFlashCharge );
+	CNetworkVar( int, m_iSurvFlashSpares );
+	CNetworkVar( bool, m_bSurvFlashSwapping );
+#endif
 
 	// Ladder related data
 	CNetworkVar( EHANDLE, m_hLadder );

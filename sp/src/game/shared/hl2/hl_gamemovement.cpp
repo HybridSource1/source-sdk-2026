@@ -1302,3 +1302,118 @@ unsigned int CHL2GameMovement::PlayerSolidMask( bool brushOnly )
 
 	EXPOSE_SINGLE_INTERFACE_GLOBALVAR(CGameMovement, IGameMovement,INTERFACENAME_GAMEMOVEMENT, g_GameMovement );
 #endif
+
+#ifdef MAPBASE
+//=============================================================================
+// Survival feel: movement
+//
+// Replicated so client prediction matches the server. "sv_surv_movement 0"
+// restores stock HL2 movement.
+//=============================================================================
+ConVar sv_surv_movement( "sv_surv_movement", "1", FCVAR_REPLICATED | FCVAR_ARCHIVE, "Enable survival-horror movement tuning." );
+ConVar sv_surv_accel( "sv_surv_accel", "5", FCVAR_REPLICATED, "Ground acceleration (stock HL2 is 10). Lower = heavier, slower to reach full speed." );
+ConVar sv_surv_reverse_accel( "sv_surv_reverse_accel", "0.75", FCVAR_REPLICATED, "Acceleration multiplier when pushing against current momentum." );
+ConVar sv_surv_air_accel( "sv_surv_air_accel", "3", FCVAR_REPLICATED, "Air control (stock HL2 is 10)." );
+ConVar sv_surv_backpedal_scale( "sv_surv_backpedal_scale", "0.62", FCVAR_REPLICATED, "Speed multiplier when moving backwards." );
+ConVar sv_surv_strafe_scale( "sv_surv_strafe_scale", "0.82", FCVAR_REPLICATED, "Speed multiplier for sideways movement." );
+ConVar sv_surv_jump_scale( "sv_surv_jump_scale", "0.9", FCVAR_REPLICATED, "Jump velocity multiplier. Height scales with the square (0.9 = ~17 units instead of 21)." );
+ConVar sv_surv_jump_no_boost( "sv_surv_jump_no_boost", "1", FCVAR_REPLICATED, "Remove the HL2 forward speed boost on jump." );
+ConVar sv_surv_land_min( "sv_surv_land_min", "180", FCVAR_REPLICATED, "Fall speed at which landing starts to slow you down." );
+ConVar sv_surv_land_keep( "sv_surv_land_keep", "0.3", FCVAR_REPLICATED, "Fraction of horizontal speed kept after a hard (near-damage) landing." );
+
+//-----------------------------------------------------------------------------
+// Purpose: Directional penalties. Backing away from something is slow.
+//-----------------------------------------------------------------------------
+void CHL2GameMovement::CheckParameters( void )
+{
+	BaseClass::CheckParameters();
+
+	if ( !sv_surv_movement.GetBool() || player->GetMoveType() != MOVETYPE_WALK )
+		return;
+
+	if ( mv->m_flForwardMove < 0.0f )
+		mv->m_flForwardMove *= sv_surv_backpedal_scale.GetFloat();
+
+	mv->m_flSideMove *= sv_surv_strafe_scale.GetFloat();
+}
+
+//-----------------------------------------------------------------------------
+// Purpose: Heavier ground acceleration; changing direction fights momentum.
+//-----------------------------------------------------------------------------
+void CHL2GameMovement::Accelerate( Vector& wishdir, float wishspeed, float accel )
+{
+	if ( sv_surv_movement.GetBool() && player->GetGroundEntity() != NULL && player->GetMoveType() == MOVETYPE_WALK )
+	{
+		accel = sv_surv_accel.GetFloat();
+
+		float flSpeed = mv->m_vecVelocity.Length2D();
+		if ( flSpeed > 1.0f )
+		{
+			float flDot = ( mv->m_vecVelocity.x * wishdir.x + mv->m_vecVelocity.y * wishdir.y ) / flSpeed;
+			if ( flDot < 0.0f )
+				accel *= Lerp( -flDot, 1.0f, sv_surv_reverse_accel.GetFloat() );
+		}
+	}
+
+	BaseClass::Accelerate( wishdir, wishspeed, accel );
+}
+
+//-----------------------------------------------------------------------------
+// Purpose: Less air steering - you commit to a jump.
+//-----------------------------------------------------------------------------
+void CHL2GameMovement::AirAccelerate( Vector& wishdir, float wishspeed, float accel )
+{
+	if ( sv_surv_movement.GetBool() )
+		accel = sv_surv_air_accel.GetFloat();
+
+	BaseClass::AirAccelerate( wishdir, wishspeed, accel );
+}
+
+//-----------------------------------------------------------------------------
+// Purpose: Lower, grounded jumps with no speed boost.
+//-----------------------------------------------------------------------------
+bool CHL2GameMovement::CheckJumpButton( void )
+{
+	Vector vecPreJump = mv->m_vecVelocity;
+
+	bool bJumped = BaseClass::CheckJumpButton();
+
+	if ( bJumped && sv_surv_movement.GetBool() )
+	{
+		float flAdded = mv->m_vecVelocity.z - vecPreJump.z;
+		mv->m_vecVelocity.z = vecPreJump.z + flAdded * sv_surv_jump_scale.GetFloat();
+
+		if ( sv_surv_jump_no_boost.GetBool() )
+		{
+			mv->m_vecVelocity.x = vecPreJump.x;
+			mv->m_vecVelocity.y = vecPreJump.y;
+		}
+	}
+
+	return bJumped;
+}
+
+//-----------------------------------------------------------------------------
+// Purpose: Hard landings bleed off momentum so drops feel like they hurt.
+//-----------------------------------------------------------------------------
+void CHL2GameMovement::CheckFalling( void )
+{
+	float flFallVelocity = player->m_Local.m_flFallVelocity;
+	bool bLanding = ( player->GetGroundEntity() != NULL && flFallVelocity > 0.0f );
+
+	BaseClass::CheckFalling();
+
+	if ( !bLanding || !sv_surv_movement.GetBool() || player->GetWaterLevel() > 0 )
+		return;
+
+	float flMin = sv_surv_land_min.GetFloat();
+	if ( flFallVelocity <= flMin )
+		return;
+
+	float t = RemapValClamped( flFallVelocity, flMin, PLAYER_MAX_SAFE_FALL_SPEED, 0.0f, 1.0f );
+	float flKeep = Lerp( t, 1.0f, sv_surv_land_keep.GetFloat() );
+
+	mv->m_vecVelocity.x *= flKeep;
+	mv->m_vecVelocity.y *= flKeep;
+}
+#endif // MAPBASE

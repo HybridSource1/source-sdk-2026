@@ -15,6 +15,9 @@
 #include <vgui_controls/AnimationController.h>
 #include <vgui/ISurface.h>
 #include "c_basehlplayer.h"
+#ifdef MAPBASE
+#include "mapbase/survival_flashlight_shared.h"
+#endif
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -29,12 +32,21 @@ class CHudFlashlight : public CHudElement, public vgui::Panel
 public:
 	CHudFlashlight( const char *pElementName );
 	virtual void ApplySchemeSettings( vgui::IScheme *pScheme );
+#ifdef MAPBASE
+	virtual bool ShouldDraw( void );
+#endif
 
 protected:
 	virtual void Paint();
 
 private:
 	void SetFlashlightState( bool flashlightOn );
+#ifdef MAPBASE
+	void PaintSurvival( C_BaseHLPlayer *pPlayer );
+	CPanelAnimationVar( vgui::HFont, m_hTextFont, "TextFont", "Default" );
+	CPanelAnimationVarAliasType( float, m_flSpareX, "spare_xpos", "34", "proportional_float" );
+	CPanelAnimationVarAliasType( float, m_flSpareY, "spare_ypos", "6", "proportional_float" );
+#endif
 	void Reset( void );
 	
 	bool	m_bFlashlightOn;
@@ -53,7 +65,10 @@ private:
 
 using namespace vgui;
 
-#ifdef HL2_EPISODIC
+#define WCHAR_FLASHLIGHT_ON  169
+#define WCHAR_FLASHLIGHT_OFF 174
+
+#if defined( HL2_EPISODIC ) || defined( MAPBASE )
 DECLARE_HUDELEMENT( CHudFlashlight );
 #endif // HL2_EPISODIC
 
@@ -65,8 +80,94 @@ CHudFlashlight::CHudFlashlight( const char *pElementName ) : CHudElement( pEleme
 	vgui::Panel *pParent = g_pClientMode->GetViewport();
 	SetParent( pParent );
 
+#ifdef MAPBASE
+	// Suit requirement is checked in ShouldDraw so the survival flashlight
+	// can work without the HEV suit.
+	SetHiddenBits( HIDEHUD_HEALTH | HIDEHUD_PLAYERDEAD );
+#else
 	SetHiddenBits( HIDEHUD_HEALTH | HIDEHUD_PLAYERDEAD | HIDEHUD_NEEDSUIT );
+#endif
 }
+
+#ifdef MAPBASE
+//-----------------------------------------------------------------------------
+bool CHudFlashlight::ShouldDraw( void )
+{
+	C_BasePlayer *pPlayer = C_BasePlayer::GetLocalPlayer();
+	if ( !pPlayer )
+		return false;
+
+	bool bNeedSuit = SurvivalFlashlight_IsEnabled() ? sv_surv_flashlight_needsuit.GetBool() : true;
+	if ( bNeedSuit && !pPlayer->IsSuitEquipped() )
+		return false;
+
+#ifndef HL2_EPISODIC
+	// Plain HL2 builds only have something to show in survival mode.
+	if ( !SurvivalFlashlight_IsEnabled() )
+		return false;
+#endif
+
+	return CHudElement::ShouldDraw();
+}
+
+//-----------------------------------------------------------------------------
+// Purpose: Icon, charge bar, spare count. Bar blinks while swapping.
+//-----------------------------------------------------------------------------
+void CHudFlashlight::PaintSurvival( C_BaseHLPlayer *pPlayer )
+{
+	bool bIsOn = pPlayer->IsEffectActive( EF_DIMLIGHT );
+	bool bSwapping = pPlayer->m_HL2Local.m_bSurvFlashSwapping;
+	float flCharge = pPlayer->m_HL2Local.m_flSurvFlashCharge;
+	int nSpares = pPlayer->m_HL2Local.m_iSurvFlashSpares;
+
+	int chunkCount = m_flBarWidth / ( m_flBarChunkWidth + m_flBarChunkGap );
+	int enabledChunks = bSwapping ? 0 : (int)ceilf( (float)chunkCount * ( flCharge / 100.0f ) );
+	enabledChunks = clamp( enabledChunks, 0, chunkCount );
+
+	bool bLow = flCharge < sv_surv_flashlight_dim_start.GetFloat();
+	Color clr = ( bLow || bSwapping ) ? gHUD.m_clrCaution : gHUD.m_clrNormal;
+	clr[3] = ( bIsOn || bSwapping ) ? 255 : 96;
+
+	// Blink the whole element while the battery is out.
+	if ( bSwapping && fmodf( gpGlobals->curtime, 0.5f ) < 0.25f )
+		clr[3] = 48;
+
+	surface()->DrawSetTextFont( m_hFont );
+	surface()->DrawSetTextColor( clr );
+	surface()->DrawSetTextPos( m_IconX, m_IconY );
+	surface()->DrawUnicodeChar( bIsOn ? WCHAR_FLASHLIGHT_ON : WCHAR_FLASHLIGHT_OFF );
+
+	// Charge bar (always shown - battery is a resource now)
+	int xpos = m_flBarInsetX, ypos = m_flBarInsetY;
+	surface()->DrawSetColor( clr );
+	for ( int i = 0; i < enabledChunks; i++ )
+	{
+		surface()->DrawFilledRect( xpos, ypos, xpos + m_flBarChunkWidth, ypos + m_flBarHeight );
+		xpos += ( m_flBarChunkWidth + m_flBarChunkGap );
+	}
+
+	Color clrEmpty = clr;
+	clrEmpty[3] = clr[3] / 6;
+	surface()->DrawSetColor( clrEmpty );
+	for ( int i = enabledChunks; i < chunkCount; i++ )
+	{
+		surface()->DrawFilledRect( xpos, ypos, xpos + m_flBarChunkWidth, ypos + m_flBarHeight );
+		xpos += ( m_flBarChunkWidth + m_flBarChunkGap );
+	}
+
+	// Spare batteries
+	wchar_t wszSpares[16];
+	V_snwprintf( wszSpares, ARRAYSIZE( wszSpares ), L"x%d", nSpares );
+
+	Color clrText = nSpares > 0 ? gHUD.m_clrNormal : gHUD.m_clrCaution;
+	clrText[3] = ( bIsOn || bSwapping || nSpares == 0 ) ? 255 : 128;
+
+	surface()->DrawSetTextFont( m_hTextFont );
+	surface()->DrawSetTextColor( clrText );
+	surface()->DrawSetTextPos( m_flSpareX, m_flSpareY );
+	surface()->DrawPrintText( wszSpares, wcslen( wszSpares ) );
+}
+#endif
 
 //-----------------------------------------------------------------------------
 // Purpose: 
@@ -96,14 +197,22 @@ void CHudFlashlight::SetFlashlightState( bool flashlightOn )
 	m_bFlashlightOn = flashlightOn;
 }
 
-#define WCHAR_FLASHLIGHT_ON  169
-#define WCHAR_FLASHLIGHT_OFF 174
 
 //-----------------------------------------------------------------------------
 // Purpose: draws the flashlight icon
 //-----------------------------------------------------------------------------
 void CHudFlashlight::Paint()
 {
+#ifdef MAPBASE
+	if ( SurvivalFlashlight_IsEnabled() )
+	{
+		C_BaseHLPlayer *pSurvPlayer = (C_BaseHLPlayer *)C_BasePlayer::GetLocalPlayer();
+		if ( pSurvPlayer )
+			PaintSurvival( pSurvPlayer );
+		return;
+	}
+#endif
+
 #ifdef HL2_EPISODIC
 	C_BaseHLPlayer *pPlayer = (C_BaseHLPlayer *)C_BasePlayer::GetLocalPlayer();
 	if ( !pPlayer )

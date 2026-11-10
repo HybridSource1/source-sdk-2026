@@ -61,6 +61,10 @@
 // NVNT haptics system interface
 #include "haptics/ihaptics.h"
 
+#ifdef MAPBASE
+#include "mapbase/survival_feel.h"
+#endif
+
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
 
@@ -1330,8 +1334,17 @@ void C_BasePlayer::UpdateFlashlight()
 		Vector vecForward, vecRight, vecUp;
 		EyeVectors( &vecForward, &vecRight, &vecUp );
 
+#ifdef MAPBASE
+		Vector vecPos = EyePosition();
+		if ( IsLocalPlayer() )
+			SurvivalFeel::ApplyFlashlight( this, vecPos, vecForward, vecRight, vecUp );
+
+		// Update the light with the new position and direction.
+		m_pFlashlight->UpdateLight( vecPos, vecForward, vecRight, vecUp, FLASHLIGHT_DISTANCE );
+#else
 		// Update the light with the new position and direction.		
 		m_pFlashlight->UpdateLight( EyePosition(), vecForward, vecRight, vecUp, FLASHLIGHT_DISTANCE );
+#endif
 	}
 	else if (m_pFlashlight)
 	{
