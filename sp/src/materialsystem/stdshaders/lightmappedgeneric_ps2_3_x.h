@@ -129,6 +129,24 @@ const float4x4 obbMatrix					: register(c22); //through c25
 const HALF g_BlendInverted					: register(c21);
 #endif
 
+#if defined( SHADER_MODEL_PS_3_0 )
+// ( 1/width, 1/height, width, height ) of the lightmap page when bicubic lightmap
+// filtering is on, all zero when it is off. Set every draw by the C++ side.
+const float4 g_LightmapBicubicParams		: register( c36 );
+#endif
+
+float3 LightmapFetch( sampler s, float2 vTexCoord )
+{
+#if defined( SHADER_MODEL_PS_3_0 )
+	[branch]
+	if ( g_LightmapBicubicParams.z > 0.0f )
+	{
+		return LightMapSampleBicubic( s, vTexCoord, g_LightmapBicubicParams );
+	}
+#endif
+	return LightMapSample( s, vTexCoord );
+}
+
 
 sampler BaseTextureSampler		: register( s0 );
 sampler LightmapSampler			: register( s1 );
@@ -278,14 +296,14 @@ HALF4 main( PS_INPUT i ) : COLOR
 		ComputeBumpedLightmapCoordinates( i.lightmapTexCoord1And2, i.lightmapTexCoord3.xy,
 			bumpCoord1, bumpCoord2, bumpCoord3 );
 		
-		lightmapColor1 = LightMapSample( LightmapSampler, bumpCoord1 );
-		lightmapColor2 = LightMapSample( LightmapSampler, bumpCoord2 );
-		lightmapColor3 = LightMapSample( LightmapSampler, bumpCoord3 );
+		lightmapColor1 = LightmapFetch( LightmapSampler, bumpCoord1 );
+		lightmapColor2 = LightmapFetch( LightmapSampler, bumpCoord2 );
+		lightmapColor3 = LightmapFetch( LightmapSampler, bumpCoord3 );
 	}
 	else
 	{
 		HALF2 bumpCoord1 = ComputeLightmapCoordinates( i.lightmapTexCoord1And2, i.lightmapTexCoord3.xy );
-		lightmapColor1 = LightMapSample( LightmapSampler, bumpCoord1 );
+		lightmapColor1 = LightmapFetch( LightmapSampler, bumpCoord1 );
 	}
 #endif
 

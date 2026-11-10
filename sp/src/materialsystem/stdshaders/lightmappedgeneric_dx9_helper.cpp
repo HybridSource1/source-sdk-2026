@@ -35,6 +35,12 @@ ConVar mat_force_lightmapped_phong( "mat_force_lightmapped_phong", "0", FCVAR_CH
 ConVar mat_force_lightmapped_phong_boost( "mat_force_lightmapped_phong_boost", "5.0", FCVAR_CHEAT );
 ConVar mat_force_lightmapped_phong_exp( "mat_force_lightmapped_phong_exp", "50.0", FCVAR_CHEAT );
 
+// Bicubic lightmap filtering reads one luxel past each lightmap's edge, so it is only
+// safe on maps whose lightmaps VRAD padded (-bicubiclightmaps). The client sets
+// mat_bicubic_lightmaps_map on level load from the map's worldspawn.
+ConVar mat_bicubic_lightmaps( "mat_bicubic_lightmaps", "1", FCVAR_ARCHIVE, "Smooth lightmaps with bicubic filtering on maps compiled with VRAD's -bicubiclightmaps. Needs shader model 3." );
+ConVar mat_bicubic_lightmaps_map( "mat_bicubic_lightmaps_map", "0", FCVAR_HIDDEN, "Set by the client: 1 when the loaded map has padded lightmaps." );
+
 class CLightmappedGeneric_DX9_Context : public CBasePerMaterialContextData
 {
 public:
@@ -1749,6 +1755,26 @@ void DrawLightmappedGeneric_DX9_Internal(CBaseVSShader *pShader, IMaterialVar** 
 		pShaderAPI->GetWorldSpaceCameraPosition( eyePos );
 		eyePos[3] = pShaderAPI->GetFloatRenderingParameter( FLOAT_RENDERPARM_MINIMUMLIGHTING );
 		DynamicCmdsOut.SetPixelShaderConstant( 10, eyePos );
+
+		if ( g_pHardwareConfig->SupportsShaderModel_3_0() )
+		{
+			// Lightmap pages can differ in size, so this is read for every draw.
+			float vBicubic[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+			int nLightmapWidth = 0, nLightmapHeight = 0;
+			bool bMaterialAllows = ( info.m_nNoBicubicLightmap == -1 ) || !params[info.m_nNoBicubicLightmap]->GetIntValue();
+			if ( bMaterialAllows && mat_bicubic_lightmaps.GetBool() && mat_bicubic_lightmaps_map.GetBool() && nFixedLightingMode == 0 )
+			{
+				pShaderAPI->GetLightmapDimensions( &nLightmapWidth, &nLightmapHeight );
+			}
+			if ( nLightmapWidth > 0 && nLightmapHeight > 0 )
+			{
+				vBicubic[0] = 1.0f / nLightmapWidth;
+				vBicubic[1] = 1.0f / nLightmapHeight;
+				vBicubic[2] = nLightmapWidth;
+				vBicubic[3] = nLightmapHeight;
+			}
+			DynamicCmdsOut.SetPixelShaderConstant( 36, vBicubic, 1 );
+		}
 
 		DynamicCmdsOut.End();
 		pShaderAPI->ExecuteCommandBuffer( DynamicCmdsOut.Base() );

@@ -715,7 +715,8 @@ void FinalLightFace( int iThread, int facenum )
 			}
 		}
 
-		if (numbounce > 0 && k == 0)
+		// with -pathtrace, bounced light is already in the direct samples
+		if (numbounce > 0 && k == 0 && !g_bPathTrace)
 		{
 			// currently only radiosity light non-displacement surfaces!
 			if( !bDisp )

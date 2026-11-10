@@ -294,6 +294,14 @@ extern CUtlVector<char const *> g_NonShadowCastingMaterialStrings;
 extern void ForceTextureShadowsOnModel( const char *pModelName );
 extern bool IsModelTextureShadowsForced( const char *pModelName );
 
+// Path-traced indirect lighting (vrad_pathbounce.cpp)
+extern bool g_bPathTrace;
+extern int g_nPathSamples;
+extern int g_nPathBounces;
+extern bool g_bPathDenoise;
+void PathBounce_CaptureTriangles();
+void PathBounce_Run();
+
 // Raytracing
 
 #define TRACE_ID_SKY           0x01000000  // sky face ray blocker
@@ -345,6 +353,11 @@ extern float	g_flMaxDispSampleSize;
 extern float	g_SunAngularExtent;
 
 extern char		source[MAX_PATH];
+
+// Lightmap padding for bicubic filtering (vrad_lightmappadding.cpp)
+extern bool g_bBicubicLightmaps;
+void LightmapPadding_OnLoad();
+void LightmapPadding_OnFinish();
 
 // Used by incremental lighting to trivial-reject faces.
 // There is a bit in here for each face telling whether or not any of the

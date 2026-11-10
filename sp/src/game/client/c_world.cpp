@@ -202,8 +202,29 @@ void C_World::Spawn( void )
 //-----------------------------------------------------------------------------
 // Parse data from a map file
 //-----------------------------------------------------------------------------
+#ifdef MAPBASE
+// Tells the shaders whether this map's lightmaps were padded for bicubic filtering.
+// The convar lives in the shader DLL, so it is looked up by name.
+static void SetBicubicLightmapsAllowed( bool bAllowed )
+{
+	ConVarRef mat_bicubic_lightmaps_map( "mat_bicubic_lightmaps_map", true );
+	if ( mat_bicubic_lightmaps_map.IsValid() )
+	{
+		mat_bicubic_lightmaps_map.SetValue( bAllowed ? 1 : 0 );
+	}
+}
+#endif
+
 bool C_World::KeyValue( const char *szKeyName, const char *szValue ) 
 {
+#ifdef MAPBASE
+	// Written by VRAD's -bicubiclightmaps
+	if ( FStrEq( szKeyName, "vrad_lightmap_padding" ) )
+	{
+		SetBicubicLightmapsAllowed( atoi( szValue ) != 0 );
+		return true;
+	}
+#endif
 #ifdef MAPBASE_VSCRIPT
 	if ( FStrEq( szKeyName, "vscriptlanguage" ) )
 	{
@@ -226,6 +247,9 @@ bool C_World::KeyValue( const char *szKeyName, const char *szValue )
 //-----------------------------------------------------------------------------
 void C_World::ParseWorldMapData( const char *pMapData )
 {
+	// Off until this map's worldspawn says its lightmaps are padded.
+	SetBicubicLightmapsAllowed( false );
+
 	char szTokenBuffer[MAPKEY_MAXLENGTH];
 	for ( ; true; pMapData = MapEntity_SkipToNextEntity(pMapData, szTokenBuffer) )
 	{

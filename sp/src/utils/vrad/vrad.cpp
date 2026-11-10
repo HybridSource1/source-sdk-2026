@@ -2056,7 +2056,12 @@ bool RadWorld_Go()
 			}
 		}
 
-		if (numbounce > 0)
+		if ( g_bPathTrace && numbounce > 0 )
+		{
+			// the helper's indirect light goes straight into the direct samples
+			PathBounce_Run();
+		}
+		else if (numbounce > 0)
 		{
 			// allocate memory for emitlight/addlight
 			emitlight.SetSize( g_Patches.Size() );
@@ -2183,6 +2188,7 @@ void VRAD_LoadBSP( char const *pFilename )
 	Msg( "Loading %s\n", platformPath );
 	VMPI_SetCurrentStage( "LoadBSPFile" );
 	LoadBSPFile (platformPath);
+	LightmapPadding_OnLoad();
 	
 	// now, set whether or not static prop lighting is present
 	if (g_bStaticPropLighting)
@@ -2213,6 +2219,11 @@ void VRAD_LoadBSP( char const *pFilename )
 
 	StaticPropMgr()->Init();
 	StaticDispMgr()->Init();
+
+	if ( g_bPathTrace && g_bUseMPI )
+	{
+		Error( "-pathtrace can't be used with -mpi.\n" );
+	}
 
 	if (!visdatasize)
 	{
@@ -2253,6 +2264,9 @@ void VRAD_LoadBSP( char const *pFilename )
 	// Dump raytracer for glview
 	if ( g_bDumpRtEnv )
 		WriteRTEnv("trace.txt");
+
+	if ( g_bPathTrace )
+		PathBounce_CaptureTriangles();
 
 	// Build acceleration structure
 	printf ( "Setting up ray-trace acceleration structure... ");
@@ -2307,6 +2321,8 @@ void VRAD_Finish()
 	{
 		PrintBSPFileSizes();
 	}
+
+	LightmapPadding_OnFinish();
 
 	Msg( "Writing %s\n", platformPath );
 	VMPI_SetCurrentStage( "WriteBSPFile" );
@@ -2422,6 +2438,27 @@ int ParseCommandLine( int argc, char **argv, bool *onlydetail )
 				return 1;
 			}
 		}
+		else if (!Q_stricmp(argv[i],"-pathtrace"))
+		{
+			g_bPathTrace = true;
+		}
+		else if (!Q_stricmp(argv[i],"-pathsamples") || !Q_stricmp(argv[i],"-pathbounces"))
+		{
+			const bool bSamples = !Q_stricmp(argv[i],"-pathsamples");
+			if ( ++i < argc && atoi(argv[i]) > 0 )
+			{
+				( bSamples ? g_nPathSamples : g_nPathBounces ) = atoi(argv[i]);
+			}
+			else
+			{
+				Warning("Error: expected a positive value after '%s'\n", argv[i-1] );
+				return 1;
+			}
+		}
+		else if (!Q_stricmp(argv[i],"-pathnodenoise"))
+		{
+			g_bPathDenoise = false;
+		}
 		else if (!Q_stricmp(argv[i],"-verbose") || !Q_stricmp(argv[i],"-v"))
 		{
 			verbose = true;
@@ -2456,6 +2493,10 @@ int ParseCommandLine( int argc, char **argv, bool *onlydetail )
 				Warning("Error: expected a filepath after '-lights'\n" );
 				return 1;
 			}
+		}
+		else if (!Q_stricmp(argv[i],"-bicubiclightmaps"))
+		{
+			g_bBicubicLightmaps = true;
 		}
 		else if (!Q_stricmp(argv[i],"-noextra"))
 		{
@@ -2807,6 +2848,10 @@ void PrintUsage( int argc, char **argv )
 		"\n"
 		"  -v (or -verbose): Turn on verbose output (also shows more command\n"
 		"  -bounce #       : Set max number of bounces (default: 100).\n"
+		"  -pathtrace      : Path trace indirect light with vrad15_bake instead of patch radiosity.\n"
+		"  -pathsamples #  : Rays per lightmap sample with -pathtrace (default: 256).\n"
+		"  -pathbounces #  : Max bounces with -pathtrace (default: 8).\n"
+		"  -pathnodenoise  : Turn off denoising with -pathtrace.\n"
 		"  -fast           : Quick and dirty lighting.\n"
 #ifdef MAPBASE
 		"  -ultrafast	  : Very quick and dirty lighting, same as -fast -fastambient -noextra -bounce 1\n"
@@ -2835,6 +2880,7 @@ void PrintUsage( int argc, char **argv )
 		"  -lights <file>  : Load a lights file in addition to lights.rad and the\n"
 		"                    level lights file.\n"
 		"  -noextra        : Disable supersampling.\n"
+		"  -bicubiclightmaps : Pad lightmaps so Mapbase's shaders can filter them bicubically.\n"
 		"  -debugextra     : Places debugging data in lightmaps to visualize\n"
 		"                    supersampling.\n"
 		"  -smooth #       : Set the threshold for smoothing groups, in degrees\n"

@@ -345,6 +345,40 @@ float DepthToDestAlpha( const float flProjZ )
 }
 
 
+// ACES filmic tonemapping, applied to everything drawn with the linear tonemap scale.
+// Set TONEMAP_ACES to 0 and rebuild the shaders to get stock Source tonemapping back.
+#ifndef TONEMAP_ACES
+#define TONEMAP_ACES 1
+#endif
+
+// Brightness going into the curve. 1.46 keeps mid grey (0.18) at 0.18, so scenes
+// keep roughly their stock exposure and only highlights and deep shadows change.
+#ifndef TONEMAP_ACES_EXPOSURE
+#define TONEMAP_ACES_EXPOSURE 1.46f
+#endif
+
+#if TONEMAP_ACES && ( defined(SHADER_MODEL_PS_2_B) || defined(SHADER_MODEL_PS_3_0) )
+#define TONEMAP_ACES_ACTIVE 1
+// Stephen Hill's fit of the ACES reference rendering and sRGB output transforms.
+float3 TonemapACES( float3 vColor )
+{
+	// sRGB => AP1, with the RRT saturation tweak folded in
+	const float3x3 mInput = { 0.59719f, 0.35458f, 0.04823f,
+							  0.07600f, 0.90834f, 0.01566f,
+							  0.02840f, 0.13383f, 0.83777f };
+	// ODT saturation and AP1 => sRGB
+	const float3x3 mOutput = {  1.60475f, -0.53108f, -0.07367f,
+							   -0.10208f,  1.10813f, -0.00605f,
+							   -0.00327f, -0.07276f,  1.07602f };
+	float3 v = mul( mInput, vColor * TONEMAP_ACES_EXPOSURE );
+	float3 a = v * ( v + 0.0245786f ) - 0.000090537f;
+	float3 b = v * ( 0.983729f * v + 0.4329510f ) + 0.238081f;
+	return saturate( mul( mOutput, a / b ) );
+}
+#else
+#define TONEMAP_ACES_ACTIVE 0
+#endif
+
 float4 FinalOutput( const float4 vShaderColor, float pixelFogFactor, const int iPIXELFOGTYPE, const int iTONEMAP_SCALE_TYPE, const bool bWriteDepthToDestAlpha = false, const float flProjZ = 1.0f )
 {
 	float4 result;
@@ -367,6 +401,14 @@ float4 FinalOutput( const float4 vShaderColor, float pixelFogFactor, const int i
 		result.a = vShaderColor.a;
 
 	result.rgb = BlendPixelFog( result.rgb, pixelFogFactor, g_LinearFogColor.rgb, iPIXELFOGTYPE );
+
+#if TONEMAP_ACES_ACTIVE
+	// After fog, so fog fades into the same curve as the surface behind it.
+	if( iTONEMAP_SCALE_TYPE == TONEMAP_SCALE_LINEAR )
+	{
+		result.rgb = TonemapACES( result.rgb );
+	}
+#endif
 	
 #if !(defined(SHADER_MODEL_PS_1_1) || defined(SHADER_MODEL_PS_1_4) || defined(SHADER_MODEL_PS_2_0)) //Minimum requirement of ps2b
 	result.rgb = SRGBOutput( result.rgb ); //SRGB in pixel shader conversion
