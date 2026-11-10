@@ -152,6 +152,40 @@ void GetBaseTextureAndNormal( sampler base, sampler base2, sampler bump, bool bB
 
 
 
+#if defined( SHADER_MODEL_PS_3_0 )
+// Cubic B-spline lightmap filtering, built from four bilinear fetches
+// (GPU Gems 2, chapter 20). vTexSize is ( 1/width, 1/height, width, height ) of the
+// lightmap page. The filter reads one luxel beyond the bilinear footprint, so the map
+// must be compiled with VRAD's -bicubiclightmaps, which pads each lightmap by one luxel.
+float3 LightMapSampleBicubic( sampler LightmapSampler, float2 vTexCoord, float4 vTexSize )
+{
+	float2 p = vTexCoord * vTexSize.zw - 0.5f;
+	float2 f = frac( p );
+	float2 cell = p - f;
+
+	float2 f2 = f * f;
+	float2 f3 = f2 * f;
+	float2 w0 = ( 1.0f - 3.0f * f + 3.0f * f2 - f3 ) * ( 1.0f / 6.0f );
+	float2 w1 = ( 4.0f - 6.0f * f2 + 3.0f * f3 ) * ( 1.0f / 6.0f );
+	float2 w2 = ( 1.0f + 3.0f * f + 3.0f * f2 - 3.0f * f3 ) * ( 1.0f / 6.0f );
+	float2 w3 = f3 * ( 1.0f / 6.0f );
+
+	// g0 and g1 are never below 1/6, so the divisions are safe.
+	float2 g0 = w0 + w1;
+	float2 g1 = w2 + w3;
+	float2 lo = ( cell - 0.5f + w1 / g0 ) * vTexSize.xy;
+	float2 hi = ( cell + 1.5f + w3 / g1 ) * vTexSize.xy;
+
+	// tex2Dlod, because this runs under a dynamic branch. Lightmaps have no mips.
+	float3 s00 = tex2Dlod( LightmapSampler, float4( lo.x, lo.y, 0, 0 ) ).rgb;
+	float3 s10 = tex2Dlod( LightmapSampler, float4( hi.x, lo.y, 0, 0 ) ).rgb;
+	float3 s01 = tex2Dlod( LightmapSampler, float4( lo.x, hi.y, 0, 0 ) ).rgb;
+	float3 s11 = tex2Dlod( LightmapSampler, float4( hi.x, hi.y, 0, 0 ) ).rgb;
+
+	return g0.y * ( g0.x * s00 + g1.x * s10 ) + g1.y * ( g0.x * s01 + g1.x * s11 );
+}
+#endif
+
 float3 LightMapSample( sampler LightmapSampler, float2 vTexCoord )
 {
 #	if ( !defined( _X360 ) || !defined( USE_32BIT_LIGHTMAPS_ON_360 ) )

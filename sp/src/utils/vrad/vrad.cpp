@@ -2188,6 +2188,7 @@ void VRAD_LoadBSP( char const *pFilename )
 	Msg( "Loading %s\n", platformPath );
 	VMPI_SetCurrentStage( "LoadBSPFile" );
 	LoadBSPFile (platformPath);
+	LightmapPadding_OnLoad();
 	
 	// now, set whether or not static prop lighting is present
 	if (g_bStaticPropLighting)
@@ -2320,6 +2321,8 @@ void VRAD_Finish()
 	{
 		PrintBSPFileSizes();
 	}
+
+	LightmapPadding_OnFinish();
 
 	Msg( "Writing %s\n", platformPath );
 	VMPI_SetCurrentStage( "WriteBSPFile" );
@@ -2490,6 +2493,10 @@ int ParseCommandLine( int argc, char **argv, bool *onlydetail )
 				Warning("Error: expected a filepath after '-lights'\n" );
 				return 1;
 			}
+		}
+		else if (!Q_stricmp(argv[i],"-bicubiclightmaps"))
+		{
+			g_bBicubicLightmaps = true;
 		}
 		else if (!Q_stricmp(argv[i],"-noextra"))
 		{
@@ -2873,6 +2880,7 @@ void PrintUsage( int argc, char **argv )
 		"  -lights <file>  : Load a lights file in addition to lights.rad and the\n"
 		"                    level lights file.\n"
 		"  -noextra        : Disable supersampling.\n"
+		"  -bicubiclightmaps : Pad lightmaps so Mapbase's shaders can filter them bicubically.\n"
 		"  -debugextra     : Places debugging data in lightmaps to visualize\n"
 		"                    supersampling.\n"
 		"  -smooth #       : Set the threshold for smoothing groups, in degrees\n"

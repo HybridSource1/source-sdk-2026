@@ -354,6 +354,11 @@ extern float	g_SunAngularExtent;
 
 extern char		source[MAX_PATH];
 
+// Lightmap padding for bicubic filtering (vrad_lightmappadding.cpp)
+extern bool g_bBicubicLightmaps;
+void LightmapPadding_OnLoad();
+void LightmapPadding_OnFinish();
+
 // Used by incremental lighting to trivial-reject faces.
 // There is a bit in here for each face telling whether or not any of the
 // active lights can see the face.

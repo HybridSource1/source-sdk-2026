@@ -78,6 +78,7 @@ BEGIN_VS_SHADER( SDK_LightmappedGeneric,
 		SHADER_PARAM( EDGESOFTNESSEND, SHADER_PARAM_TYPE_FLOAT, "0.5", "End value for soft edges for distancealpha.")
 
 		SHADER_PARAM( PHONG, SHADER_PARAM_TYPE_BOOL, "0", "enables phong lighting" )
+		SHADER_PARAM( NOBICUBICLIGHTMAP, SHADER_PARAM_TYPE_BOOL, "0", "Use bilinear lightmap filtering. VRAD's -bicubiclightmaps sets this on displacements, whose lightmaps can't be padded." )
 		SHADER_PARAM( PHONGBOOST, SHADER_PARAM_TYPE_FLOAT, "1.0", "Phong overbrightening factor (specular mask channel should be authored to account for this)" )
 		SHADER_PARAM( PHONGFRESNELRANGES, SHADER_PARAM_TYPE_VEC3, "[0  0.5  1]", "Parameters for remapping fresnel output" )
 		SHADER_PARAM( PHONGEXPONENT, SHADER_PARAM_TYPE_FLOAT, "5.0", "Phong exponent for local specular lights" )
@@ -154,6 +155,7 @@ END_SHADER_PARAMS
 		info.m_nOutlineEnd1 = OUTLINEEND1;
 
 		info.m_nPhong = PHONG;
+		info.m_nNoBicubicLightmap = NOBICUBICLIGHTMAP;
 		info.m_nPhongBoost = PHONGBOOST;
 		info.m_nPhongFresnelRanges = PHONGFRESNELRANGES;
 		info.m_nPhongExponent = PHONGEXPONENT;

@@ -94,6 +94,8 @@ struct LightmappedGeneric_DX9_Vars_t
 	int m_nPhongFresnelRanges;
 	int m_nPhongExponent;
 
+	int m_nNoBicubicLightmap;
+
 #ifdef PARALLAX_CORRECTED_CUBEMAPS
 	// Parallax cubemaps
 	int m_nEnvmapParallax; // Needed for editor

@@ -223,6 +223,12 @@ float4 FinalOutputConst( const float4 vShaderColor, float pixelFogFactor, float 
 	result.a = lerp( result.a, DepthToDestAlpha( flProjZ ), fWriteDepthToDestAlpha );
 
 	result.rgb = BlendPixelFogConst( result.rgb, pixelFogFactor, g_LinearFogColor.rgb, fPixelFogType );
+#if TONEMAP_ACES_ACTIVE
+	if( iTONEMAP_SCALE_TYPE == TONEMAP_SCALE_LINEAR )
+	{
+		result.rgb = TonemapACES( result.rgb );
+	}
+#endif
 	result.rgb = SRGBOutput( result.rgb ); //SRGB in pixel shader conversion
 
 	return result;
