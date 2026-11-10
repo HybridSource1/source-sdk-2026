@@ -1,0 +1,88 @@
+#
+# Builds the map tools (VRAD with -pathtrace and -bicubiclightmaps), the 64-bit
+# vrad15_bake helper, and the game and shader DLLs on every push to this branch,
+# and packages the map tools so they can be dropped into a game's bin folder.
+#
+name: Build VRAD 1.5 tools
+
+on:
+  push:
+    branches:
+      - vrad-pathtrace-bicubic-aces
+  workflow_dispatch:
+
+jobs:
+  maptools:
+    uses: ./.github/workflows/mapbase_build-base.yml
+    with:
+      configuration: Release
+      branch: sp
+      project-group: maptools
+      solution-name: maptools
+      build-on-linux: false
+
+  game:
+    uses: ./.github/workflows/mapbase_build-base.yml
+    with:
+      configuration: Release
+      branch: sp
+      game: episodic
+      project-group: game
+      solution-name: games
+      build-on-linux: true
+
+  shaders:
+    uses: ./.github/workflows/mapbase_build-base.yml
+    with:
+      configuration: Release
+      branch: sp
+      game: episodic
+      project-group: shaders
+      solution-name: shaders
+      build-on-linux: true
+
+  bake_helper:
+    name: vrad15_bake (Windows x64)
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Build vrad15_bake
+      shell: pwsh
+      run: |
+        New-Item -ItemType Directory -Force out | Out-Null
+        ./sp/src/utils/vrad15_bake/build_windows.ps1 -BinDir "$PWD/out"
+
+    - name: Run the helper's tests
+      shell: pwsh
+      run: python sp/src/utils/vrad15_bake/test_bake.py out/vrad15_bake.exe
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: vrad15_bake_win64
+        path: out/*
+        if-no-files-found: error
+
+  package:
+    name: Package map tools
+    needs: [maptools, bake_helper]
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/download-artifact@v4
+      with:
+        name: maptools_win32_Release
+        path: bin
+    - uses: actions/download-artifact@v4
+      with:
+        name: vrad15_bake_win64
+        path: bin
+    - name: Keep only what Hammer needs
+      run: |
+        cd bin
+        ls -la
+        test -f vrad.exe && test -f vrad_dll.dll && test -f vrad15_bake.exe
+    - uses: actions/upload-artifact@v4
+      with:
+        name: vrad15_maptools_windows
+        path: bin/*
+        if-no-files-found: error
