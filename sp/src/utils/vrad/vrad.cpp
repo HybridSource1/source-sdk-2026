@@ -2056,7 +2056,12 @@ bool RadWorld_Go()
 			}
 		}
 
-		if (numbounce > 0)
+		if ( g_bPathTrace && numbounce > 0 )
+		{
+			// the helper's indirect light goes straight into the direct samples
+			PathBounce_Run();
+		}
+		else if (numbounce > 0)
 		{
 			// allocate memory for emitlight/addlight
 			emitlight.SetSize( g_Patches.Size() );
@@ -2214,6 +2219,11 @@ void VRAD_LoadBSP( char const *pFilename )
 	StaticPropMgr()->Init();
 	StaticDispMgr()->Init();
 
+	if ( g_bPathTrace && g_bUseMPI )
+	{
+		Error( "-pathtrace can't be used with -mpi.\n" );
+	}
+
 	if (!visdatasize)
 	{
 		Msg("No vis information, direct lighting only.\n");
@@ -2253,6 +2263,9 @@ void VRAD_LoadBSP( char const *pFilename )
 	// Dump raytracer for glview
 	if ( g_bDumpRtEnv )
 		WriteRTEnv("trace.txt");
+
+	if ( g_bPathTrace )
+		PathBounce_CaptureTriangles();
 
 	// Build acceleration structure
 	printf ( "Setting up ray-trace acceleration structure... ");
@@ -2421,6 +2434,27 @@ int ParseCommandLine( int argc, char **argv, bool *onlydetail )
 				Warning("Error: expected a value after '-bounce'\n" );
 				return 1;
 			}
+		}
+		else if (!Q_stricmp(argv[i],"-pathtrace"))
+		{
+			g_bPathTrace = true;
+		}
+		else if (!Q_stricmp(argv[i],"-pathsamples") || !Q_stricmp(argv[i],"-pathbounces"))
+		{
+			const bool bSamples = !Q_stricmp(argv[i],"-pathsamples");
+			if ( ++i < argc && atoi(argv[i]) > 0 )
+			{
+				( bSamples ? g_nPathSamples : g_nPathBounces ) = atoi(argv[i]);
+			}
+			else
+			{
+				Warning("Error: expected a positive value after '%s'\n", argv[i-1] );
+				return 1;
+			}
+		}
+		else if (!Q_stricmp(argv[i],"-pathnodenoise"))
+		{
+			g_bPathDenoise = false;
 		}
 		else if (!Q_stricmp(argv[i],"-verbose") || !Q_stricmp(argv[i],"-v"))
 		{
@@ -2807,6 +2841,10 @@ void PrintUsage( int argc, char **argv )
 		"\n"
 		"  -v (or -verbose): Turn on verbose output (also shows more command\n"
 		"  -bounce #       : Set max number of bounces (default: 100).\n"
+		"  -pathtrace      : Path trace indirect light with vrad15_bake instead of patch radiosity.\n"
+		"  -pathsamples #  : Rays per lightmap sample with -pathtrace (default: 256).\n"
+		"  -pathbounces #  : Max bounces with -pathtrace (default: 8).\n"
+		"  -pathnodenoise  : Turn off denoising with -pathtrace.\n"
 		"  -fast           : Quick and dirty lighting.\n"
 #ifdef MAPBASE
 		"  -ultrafast	  : Very quick and dirty lighting, same as -fast -fastambient -noextra -bounce 1\n"

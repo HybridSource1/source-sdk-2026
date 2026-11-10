@@ -294,6 +294,14 @@ extern CUtlVector<char const *> g_NonShadowCastingMaterialStrings;
 extern void ForceTextureShadowsOnModel( const char *pModelName );
 extern bool IsModelTextureShadowsForced( const char *pModelName );
 
+// Path-traced indirect lighting (vrad_pathbounce.cpp)
+extern bool g_bPathTrace;
+extern int g_nPathSamples;
+extern int g_nPathBounces;
+extern bool g_bPathDenoise;
+void PathBounce_CaptureTriangles();
+void PathBounce_Run();
+
 // Raytracing
 
 #define TRACE_ID_SKY           0x01000000  // sky face ray blocker
