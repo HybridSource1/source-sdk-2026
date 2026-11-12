@@ -1,0 +1,42 @@
+//========= Mapbase - https://github.com/mapbase-source/source-sdk-2013 ============//
+//
+// FGD entry for func_shatterglass. Add this to your mod's FGD (it relies on the
+// standard Targetname, Parentname and DamageFilter base classes).
+//
+//=============================================================================//
+
+@SolidClass base(Targetname, Parentname, DamageFilter) = func_shatterglass :
+	"A Source 2-style breakable glass pane. The pane is split into a procedural shard pattern; " +
+	"impacts knock out the shards around the hit point and crack the glass around that. " +
+	"Shards stay in place while they are connected to an anchored edge, and fall out once they aren't. " +
+	"Bullets, players and objects pass through the holes.\n\n" +
+	"The brush should be a thin, axis-aligned box. Put the glass material on its two large faces and nodraw on the rest."
+[
+	spawnflags(flags) =
+	[
+		1 : "Don't break from physics impacts" : 0
+		2 : "Don't break from bullets" : 0
+		4 : "No loose shards falling over time" : 0
+	]
+
+	shardsize(float) : "Shard Size" : 8 : "Average size of a shard, in units. Smaller shards look finer but cost more; panes are capped at 512 shards, and the size grows automatically to stay under that."
+	seed(integer) : "Pattern Seed" : 0 : "Seed for the shard pattern. 0 picks a random pattern each time the map loads."
+	fragility(float) : "Fragility" : "1.0" : "Multiplies how much glass each impact breaks and cracks."
+	collapsefraction(float) : "Collapse Fraction" : "0.6" : "Once this fraction of the pane's area is gone, the rest shatters at once. Use 1 to never collapse."
+	looseshardrate(float) : "Loose Shard Rate" : "1.0" : "How quickly cracked shards that are barely hanging on fall out. 0 disables it."
+	glasssurfaceprop(string) : "Surface Property" : "glass" : "Surface property used for impact effects and break sounds."
+
+	anchor_top(choices) : "Anchored: Top" : 1 : "Whether the top edge holds shards in place." = [ 0 : "No" 1 : "Yes" ]
+	anchor_bottom(choices) : "Anchored: Bottom" : 1 : "Whether the bottom edge holds shards in place." = [ 0 : "No" 1 : "Yes" ]
+	anchor_left(choices) : "Anchored: Left" : 1 : "Whether the left edge holds shards in place." = [ 0 : "No" 1 : "Yes" ]
+	anchor_right(choices) : "Anchored: Right" : 1 : "Whether the right edge holds shards in place." = [ 0 : "No" 1 : "Yes" ]
+
+	// Inputs
+	input Break(void) : "Shatter the whole pane."
+	input Shatter(vector) : "Break a circle of glass, like func_breakable_surf: 'x y radius', where x and y go from 0 to 1 across the pane and radius is in units."
+	input BreakAt(vector) : "Break the glass at a world position as if it were shot there."
+
+	// Outputs
+	output OnBroken(void) : "Fired when the pane first breaks."
+	output OnFullyBroken(void) : "Fired when the last of the glass is gone."
+]
