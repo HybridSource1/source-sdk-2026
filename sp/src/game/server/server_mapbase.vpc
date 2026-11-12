@@ -54,6 +54,8 @@ $Project
 			$File	"$SRCDIR\game\shared\mapbase\protagonist_system.h"
 			$File	"$SRCDIR\game\shared\mapbase\game_timer.cpp"
 			$File	"$SRCDIR\game\shared\mapbase\game_timer.h"
+			$File	"$SRCDIR\game\shared\mapbase\shatterglass_shared.cpp"
+			$File	"$SRCDIR\game\shared\mapbase\shatterglass_shared.h"
 			$File	"$SRCDIR\game\shared\mapbase\vscript_funcs_shared.cpp" [$MAPBASE_VSCRIPT]
 			$File	"$SRCDIR\game\shared\mapbase\vscript_funcs_shared.h" [$MAPBASE_VSCRIPT]
 			$File	"$SRCDIR\game\shared\mapbase\vscript_singletons.cpp" [$MAPBASE_VSCRIPT]
@@ -79,6 +81,7 @@ $Project
 			$File	"mapbase\expandedrs_combine.h"
 			$File	"mapbase\func_clientclip.cpp"
 			$File	"mapbase\func_fake_worldportal.cpp"
+			$File	"mapbase\func_shatterglass.cpp"
 			$File	"mapbase\GlobalStrings.cpp"
 			$File	"mapbase\GlobalStrings.h"
 			$File	"mapbase\logic_externaldata.cpp"
