@@ -1,0 +1,8 @@
+Box3D - https://github.com/erincatto/box3d
+Commit: 905a3b5cf4597143f0152bf4e33e5b3ffd9ad5c3 (v0.2.0)
+License: MIT (see LICENSE)
+
+Vendored: include/ and src/ only (no samples, tests, benchmarks or CMake files).
+
+Local changes (marked "Mapbase:"):
+- src/ctz.h: b3PopCount64 uses two __popcnt calls on 32-bit MSVC, where __popcnt64 is unavailable.

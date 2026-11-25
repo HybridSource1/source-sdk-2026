@@ -1,0 +1,3455 @@
+// SPDX-FileCopyrightText: 2026 Erin Catto
+// SPDX-License-Identifier: MIT
+
+// Dirk Gregorius contributed portions of this code
+
+#include "container.h"
+#include "math_internal.h"
+#include "shape.h"
+#include "simd.h"
+
+#include "box3d/collision.h"
+#include "box3d/constants.h"
+
+#include <stdint.h>
+
+b3DeclareArray( b3VertexNode );
+b3DeclareArray( b3MeshNode );
+b3DeclareArray( b3MeshTriangle );
+b3DeclareArray( b3Vec3 );
+b3DeclareArray( b3Primitive );
+b3DeclareArrayNative( uint8_t );
+
+#define B3_BIN_COUNT 8
+#define B3_DESIRED_TRIANGLES_PER_LEAF 4
+#define B3_LEAF_NODE 3
+#define B3_MAXIMUM_TRIANGLES_PER_LEAF 8
+#define B3_MESH_STACK_SIZE 256
+
+static bool b3IsLeaf( const b3MeshNode* node )
+{
+	return node->data.asLeaf.type == B3_LEAF_NODE;
+}
+
+static b3MeshNode* b3GetMeshNodesWrite( b3MeshData* mesh )
+{
+	if ( mesh->nodeOffset == 0 )
+	{
+		return NULL;
+	}
+
+	return (b3MeshNode*)( (intptr_t)mesh + mesh->nodeOffset );
+}
+
+static b3MeshNode* b3GetLeftChildWrite( b3MeshNode* node )
+{
+	// The left child follows its parent.
+	B3_ASSERT( !b3IsLeaf( node ) );
+	return node + 1;
+}
+
+static const b3MeshNode* b3GetLeftChild( const b3MeshNode* node )
+{
+	// The left child follows its parent.
+	B3_ASSERT( !b3IsLeaf( node ) );
+	return node + 1;
+}
+
+static b3MeshNode* b3GetRightChildWrite( b3MeshNode* node )
+{
+	// We store the offset of the right child relative to its parent
+	B3_ASSERT( !b3IsLeaf( node ) );
+	return node + node->data.asNode.childOffset;
+}
+
+static const b3MeshNode* b3GetRightChild( const b3MeshNode* node )
+{
+	// We store the offset of the right child relative to its parent
+	B3_ASSERT( !b3IsLeaf( node ) );
+	return node + node->data.asNode.childOffset;
+}
+
+static const b3MeshNode* b3GetRoot( const b3MeshData* mesh )
+{
+	// The first node is the root
+	return b3GetMeshNodes( mesh );
+}
+
+static b3MeshNode* b3GetRootWrite( b3MeshData* mesh )
+{
+	// The first node is the root
+	return b3GetMeshNodesWrite( mesh );
+}
+
+static b3MeshTriangle* b3GetMeshTrianglesWrite( b3MeshData* mesh )
+{
+	if ( mesh->triangleOffset == 0 )
+	{
+		return NULL;
+	}
+
+	return (b3MeshTriangle*)( (intptr_t)mesh + mesh->triangleOffset );
+}
+
+static b3Vec3* b3GetMeshVerticesWrite( b3MeshData* mesh )
+{
+	if ( mesh->vertexOffset == 0 )
+	{
+		return NULL;
+	}
+
+	return (b3Vec3*)( (intptr_t)mesh + mesh->vertexOffset );
+}
+
+// static b3Vec3 b3GetVertex( b3MeshData& mesh, int vertexIndex )
+//{
+//	B3_ASSERT( 0 <= vertexIndex && vertexIndex < mesh.vertexCount );
+//	b3Vec3* vertices = b3GetMeshVertices( &mesh );
+//	return vertices[vertexIndex];
+// }
+
+static uint8_t* b3GetMeshMaterialIndicesWrite( b3MeshData* mesh )
+{
+	if ( mesh->materialOffset == 0 )
+	{
+		return NULL;
+	}
+
+	return (uint8_t*)( (intptr_t)mesh + mesh->materialOffset );
+}
+
+static uint8_t* b3GetMeshFlagsWrite( b3MeshData* mesh )
+{
+	if ( mesh->flagsOffset == 0 )
+	{
+		return NULL;
+	}
+
+	return (uint8_t*)( (intptr_t)mesh + mesh->flagsOffset );
+}
+
+static int8_t* b3GetMeshEdgeAnglesWrite( b3MeshData* mesh )
+{
+	if ( mesh->edgeAngleOffset == 0 )
+	{
+		return NULL;
+	}
+
+	return (int8_t*)( (intptr_t)mesh + mesh->edgeAngleOffset );
+}
+
+static uint8_t* b3GetMeshVertexFlagsWrite( b3MeshData* mesh )
+{
+	if ( mesh->vertexFlagOffset == 0 )
+	{
+		return NULL;
+	}
+
+	return (uint8_t*)( (intptr_t)mesh + mesh->vertexFlagOffset );
+}
+
+static int b3GetNodeHeight( const b3MeshNode* node )
+{
+	if ( b3IsLeaf( node ) )
+	{
+		return 0;
+	}
+
+	const b3MeshNode* leftChild = b3GetLeftChild( node );
+	int leftHeight = b3GetNodeHeight( leftChild );
+	const b3MeshNode* rightChild = b3GetRightChild( node );
+	int rightHeight = b3GetNodeHeight( rightChild );
+
+	return 1 + b3MaxInt( leftHeight, rightHeight );
+}
+
+int b3GetHeight( const b3MeshData* mesh )
+{
+	const b3MeshNode* root = b3GetRoot( mesh );
+	if ( root == NULL )
+	{
+		return 0;
+	}
+
+	return b3GetNodeHeight( root );
+}
+
+#if B3_ENABLE_VALIDATION == 1
+static bool b3IsDegenerate( b3Vec3 v1, b3Vec3 v2, b3Vec3 v3, float minArea )
+{
+	b3Vec3 normal = b3Cross( b3Sub( v2, v1 ), b3Sub( v3, v1 ) );
+	float lengthSq = b3LengthSquared( normal );
+	return lengthSq < minArea * minArea;
+}
+
+static bool b3IsNonDegenerate( const b3MeshData* mesh, float minArea )
+{
+	const b3MeshTriangle* triangles = b3GetMeshTriangles( mesh );
+	const b3Vec3* vertices = b3GetMeshVertices( mesh );
+
+	// Check triangles
+	for ( int index = 0; index < mesh->triangleCount; ++index )
+	{
+		// Index range
+		b3MeshTriangle triangle = triangles[index];
+		if ( triangle.index1 >= mesh->vertexCount )
+		{
+			return false;
+		}
+
+		if ( triangle.index2 >= mesh->vertexCount )
+		{
+			return false;
+		}
+
+		if ( triangle.index3 >= mesh->vertexCount )
+		{
+			return false;
+		}
+
+		// Degenerate topology
+		if ( triangle.index1 == triangle.index2 )
+		{
+			return false;
+		}
+		if ( triangle.index1 == triangle.index3 )
+		{
+			return false;
+		}
+		if ( triangle.index2 == triangle.index3 )
+		{
+			return false;
+		}
+
+		// Degenerate geometry
+		b3Vec3 vertex1 = vertices[triangle.index1];
+		b3Vec3 vertex2 = vertices[triangle.index2];
+		b3Vec3 vertex3 = vertices[triangle.index3];
+		if ( b3IsDegenerate( vertex1, vertex2, vertex3, minArea ) )
+		{
+			return false;
+		}
+	}
+
+	return true;
+}
+
+static inline b3AABB b3GetNodeAABB( const b3MeshNode* node )
+{
+	return (b3AABB){
+		node->lowerBound,
+		node->upperBound,
+	};
+}
+
+static bool b3IsConsistent( const b3MeshData* mesh )
+{
+	const b3MeshTriangle* triangles = b3GetMeshTriangles( mesh );
+	const b3Vec3* vertices = b3GetMeshVertices( mesh );
+
+	// Check nodes
+	int count = 0;
+	const b3MeshNode* stack[64];
+	stack[count++] = b3GetRoot( mesh );
+
+	while ( count > 0 )
+	{
+		const b3MeshNode* node = stack[--count];
+		b3AABB nodeBounds = b3GetNodeAABB( node );
+
+		if ( b3IsLeaf( node ) == false )
+		{
+			const b3MeshNode* child1 = b3GetLeftChild( node );
+			b3AABB bounds1 = b3GetNodeAABB( child1 );
+			const b3MeshNode* child2 = b3GetRightChild( node );
+			b3AABB bounds2 = b3GetNodeAABB( child2 );
+
+			if ( b3AABB_Contains( nodeBounds, bounds1 ) == false )
+			{
+				return false;
+			}
+
+			if ( b3AABB_Contains( nodeBounds, bounds2 ) == false )
+			{
+				return false;
+			}
+
+			stack[count++] = child2;
+			stack[count++] = child1;
+		}
+		else
+		{
+			b3AABB triangleBounds = B3_BOUNDS3_EMPTY;
+			for ( uint32_t index = 0; index < node->data.asLeaf.triangleCount; ++index )
+			{
+				int triangleIndex = node->triangleOffset + index;
+				B3_ASSERT( 0 <= triangleIndex && triangleIndex < mesh->triangleCount );
+
+				b3MeshTriangle triangle = triangles[triangleIndex];
+
+				b3AABB vertexBounds = B3_BOUNDS3_EMPTY;
+				vertexBounds = b3AABB_AddPoint( vertexBounds, vertices[triangle.index1] );
+				vertexBounds = b3AABB_AddPoint( vertexBounds, vertices[triangle.index2] );
+				vertexBounds = b3AABB_AddPoint( vertexBounds, vertices[triangle.index3] );
+
+				triangleBounds = b3AABB_Union( triangleBounds, vertexBounds );
+			}
+
+			if ( !b3AABB_Contains( nodeBounds, triangleBounds ) )
+			{
+				return false;
+			}
+		}
+	}
+
+	return true;
+}
+
+bool b3IsValidMesh( const b3MeshData* meshData )
+{
+	if ( meshData == NULL )
+	{
+		return false;
+	}
+
+	if ( meshData->version != B3_MESH_VERSION )
+	{
+		return false;
+	}
+
+	if ( meshData->byteCount < (int)sizeof( b3MeshData ) )
+	{
+		return false;
+	}
+
+	return b3IsConsistent( meshData );
+}
+
+#else
+
+bool b3IsValidMesh( const b3MeshData* meshData )
+{
+	if ( meshData == NULL )
+	{
+		return false;
+	}
+
+	if ( meshData->version != B3_MESH_VERSION )
+	{
+		return false;
+	}
+
+	if ( meshData->byteCount < (int)sizeof( b3MeshData ) )
+	{
+		return false;
+	}
+
+	return true;
+}
+
+#endif
+
+static inline b3Vec3 b3GetStridedVertex( const b3Vec3* vertices, int index, size_t stride )
+{
+	return *(const b3Vec3*)( (const uint8_t*)vertices + index * stride );
+}
+
+// Node for a vertex linked list
+typedef struct b3VertexNode
+{
+	int32_t vertexIndex;
+	int nextNodeIndex;
+} b3VertexNode;
+
+#define NAME b3VertexMap
+#define KEY_TY uint64_t
+#define VAL_TY int
+#define HASH_FN vt_hash_integer
+#define CMPR_FN vt_cmpr_integer
+#define MALLOC_FN b3Alloc
+#define FREE_FN b3Free
+#include "verstable.h"
+
+typedef struct b3SpatialHash
+{
+	b3Array( b3VertexNode ) nodes;
+	const b3Vec3* vertices;
+	int vertexCount;
+	size_t stride;
+	b3VertexMap vertexMap;
+	float cellSize;
+	float tolerance;
+} b3SpatialHash;
+
+static void b3CreateSpatialHash( b3SpatialHash* h, const b3Vec3* vertices, int vertexCount, size_t stride,
+								 float tolerance )
+{
+	h->vertices = vertices;
+	h->vertexCount = vertexCount;
+	h->stride = stride;
+	h->tolerance = tolerance;
+	h->cellSize = 2.0f * tolerance;
+	b3Array_CreateN( h->nodes, vertexCount );
+
+	b3VertexMap_init( &h->vertexMap );
+	b3VertexMap_reserve( &h->vertexMap, vertexCount );
+
+	B3_ASSERT( h->cellSize > 0.0f );
+}
+
+static void b3DestroySpatialHash( b3SpatialHash* h )
+{
+	b3VertexMap_cleanup( &h->vertexMap );
+	b3Array_Destroy( h->nodes );
+}
+
+// Welding works by bucketing nearby vertices into identical keys in a hash table.
+// Bucketing is done manually with an array.
+static int32_t b3SpatialHash_FindDuplicate( b3SpatialHash* h, int32_t currentIndex )
+{
+	B3_ASSERT( currentIndex < h->vertexCount );
+	size_t stride = h->stride;
+	b3Vec3 vertex = b3GetStridedVertex( h->vertices, currentIndex, stride );
+	float cellSize = h->cellSize;
+	float tolerance = h->tolerance;
+
+	// Get the grid coordinates for the current vertex
+	int32_t baseX = (int32_t)( floorf( vertex.x / cellSize ) );
+	int32_t baseY = (int32_t)( floorf( vertex.y / cellSize ) );
+	int32_t baseZ = (int32_t)( floorf( vertex.z / cellSize ) );
+
+	// Check the current cell and all 26 neighboring cells (3x3x3 - 1)
+	for ( int dx = -1; dx <= 1; ++dx )
+	{
+		for ( int dy = -1; dy <= 1; ++dy )
+		{
+			for ( int dz = -1; dz <= 1; ++dz )
+			{
+				int32_t x = baseX + dx;
+				int32_t y = baseY + dy;
+				int32_t z = baseZ + dz;
+
+				// Compute hash for this neighboring cell (this is the key in the map)
+				uint64_t key = 0;
+				key ^= (uint64_t)( x ) + 0x9e3779b9 + ( key << 6 ) + ( key >> 2 );
+				key ^= (uint64_t)( y ) + 0x9e3779b9 + ( key << 6 ) + ( key >> 2 );
+				key ^= (uint64_t)( z ) + 0x9e3779b9 + ( key << 6 ) + ( key >> 2 );
+
+				b3VertexMap_itr it = b3VertexMap_get( &h->vertexMap, key );
+				if ( b3VertexMap_is_end( it ) == false )
+				{
+					// Check all vertices in this key
+					int nodeIndex = it.data->val;
+
+					while ( nodeIndex != B3_NULL_INDEX )
+					{
+						b3VertexNode node = h->nodes.data[nodeIndex];
+
+						int32_t existingIndex = node.vertexIndex;
+						B3_ASSERT( existingIndex < currentIndex );
+						B3_ASSERT( existingIndex < h->vertexCount );
+
+						b3Vec3 other = b3GetStridedVertex( h->vertices, existingIndex, stride );
+
+						// IsEqual inlined: check if vertices are within tolerance
+						if ( fabsf( vertex.x - other.x ) <= tolerance && fabsf( vertex.y - other.y ) <= tolerance &&
+							 fabsf( vertex.z - other.z ) <= tolerance )
+						{
+							// Found duplicate
+							return existingIndex;
+						}
+
+						nodeIndex = node.nextNodeIndex;
+					}
+				}
+			}
+		}
+	}
+
+	// No duplicate found, add to hash table
+	uint64_t currentKey = 0;
+	currentKey ^= (uint64_t)( baseX ) + 0x9e3779b9 + ( currentKey << 6 ) + ( currentKey >> 2 );
+	currentKey ^= (uint64_t)( baseY ) + 0x9e3779b9 + ( currentKey << 6 ) + ( currentKey >> 2 );
+	currentKey ^= (uint64_t)( baseZ ) + 0x9e3779b9 + ( currentKey << 6 ) + ( currentKey >> 2 );
+
+	b3VertexMap_itr it = b3VertexMap_get( &h->vertexMap, currentKey );
+	if ( b3VertexMap_is_end( it ) == false )
+	{
+		int nodeIndex = it.data->val;
+
+		b3VertexNode node = {
+			.vertexIndex = currentIndex,
+			.nextNodeIndex = nodeIndex,
+		};
+
+		it.data->val = h->nodes.count;
+		b3Array_Push( h->nodes, node );
+	}
+	else
+	{
+		b3VertexNode node = {
+			.vertexIndex = currentIndex,
+			.nextNodeIndex = B3_NULL_INDEX,
+		};
+
+		b3VertexMap_insert( &h->vertexMap, currentKey, h->nodes.count );
+		b3Array_Push( h->nodes, node );
+	}
+
+	// Not welded
+	return B3_NULL_INDEX;
+}
+
+typedef struct b3WeldData
+{
+	const b3Vec3* srcVertices;
+	const int32_t* srcIndices;
+
+	b3Vec3* dstVertices;
+	int32_t* dstIndices;
+
+	int vertexCount;
+	int indexCount;
+	size_t stride;
+} b3WeldData;
+
+static int b3WeldVertices( b3WeldData* data, float tolerance )
+{
+	int vertexCount = data->vertexCount;
+	int uniqueCount = 0;
+	size_t stride = data->stride;
+
+	// Create spatial hash and find duplicates
+	b3SpatialHash spatialHash;
+	b3CreateSpatialHash( &spatialHash, data->srcVertices, vertexCount, stride, tolerance );
+	b3Array( int ) vertexMapping = { 0 };
+	b3Array_Resize( vertexMapping, vertexCount );
+
+	for ( int i = 0; i < vertexCount; ++i )
+	{
+		int32_t duplicateIndex = b3SpatialHash_FindDuplicate( &spatialHash, i );
+
+		if ( duplicateIndex == B3_NULL_INDEX )
+		{
+			// New unique vertex
+			vertexMapping.data[i] = uniqueCount;
+			data->dstVertices[uniqueCount] = b3GetStridedVertex( data->srcVertices, i, stride );
+			uniqueCount += 1;
+		}
+		else
+		{
+			// Found duplicate, map to existing vertex
+			vertexMapping.data[i] = vertexMapping.data[duplicateIndex];
+		}
+	}
+
+	// Update indices to reference the new vertex array
+	int indexCount = data->indexCount;
+	for ( int i = 0; i < indexCount; ++i )
+	{
+		int srcIndex = data->srcIndices[i];
+		B3_ASSERT( 0 <= srcIndex && srcIndex < vertexCount );
+		data->dstIndices[i] = vertexMapping.data[srcIndex];
+	}
+
+	b3DestroySpatialHash( &spatialHash );
+	b3Array_Destroy( vertexMapping );
+
+	return uniqueCount;
+}
+
+static inline void b3StoreLeaf( b3MeshNode* node, const b3AABB* aabb, int triangleCount, int triangleOffset )
+{
+	node->data.asLeaf.type = B3_LEAF_NODE;
+	node->data.asLeaf.triangleCount = triangleCount;
+	node->triangleOffset = triangleOffset;
+	node->lowerBound = aabb->lowerBound;
+	node->upperBound = aabb->upperBound;
+}
+
+typedef struct b3Primitive
+{
+	b3AABB aabb;
+	b3Vec3 center;
+	int triangleIndex;
+	int8_t binIndex[3];
+} b3Primitive;
+
+_Static_assert( offsetof( b3Primitive, aabb.upperBound ) == 3 * sizeof( float ) &&
+					offsetof( b3Primitive, center ) == 6 * sizeof( float ),
+				"primitive floats must be contiguous" );
+
+static inline b3FloatW4 b3PrimitiveMinW4( b3FloatW4 a, b3FloatW4 b )
+{
+#if defined( B3_SIMD_SSE2 )
+	return b3MinW4( a, b );
+#else
+	return b3BlendW4( b, a, b3LessThanW4( a, b ) );
+#endif
+}
+
+static inline b3FloatW4 b3PrimitiveMaxW4( b3FloatW4 a, b3FloatW4 b )
+{
+#if defined( B3_SIMD_SSE2 )
+	return b3MaxW4( a, b );
+#else
+	return b3BlendW4( b, a, b3GreaterThanW4( a, b ) );
+#endif
+}
+
+static inline b3Vec3 b3PrimitiveLanes( b3FloatW4 v, int first )
+{
+	float lanes[4];
+	b3StoreW4( lanes, v );
+	return (b3Vec3){ lanes[first], lanes[first + 1], lanes[first + 2] };
+}
+
+static b3AABB b3PrimitiveBounds( const b3Primitive* primitives, int count )
+{
+	b3FloatW4 lower = b3SplatW4( FLT_MAX );
+	b3FloatW4 upper = b3SplatW4( -FLT_MAX );
+
+	for ( int i = 0; i < count; ++i )
+	{
+		const float* p = &primitives[i].aabb.lowerBound.x;
+		lower = b3PrimitiveMinW4( lower, b3LoadW4( p ) );
+		upper = b3PrimitiveMaxW4( upper, b3LoadW4( p + 2 ) );
+	}
+
+	return (b3AABB){ b3PrimitiveLanes( lower, 0 ), b3PrimitiveLanes( upper, 1 ) };
+}
+
+static b3AABB b3PrimitiveCenterBounds( const b3Primitive* primitives, int count )
+{
+	b3FloatW4 lower = b3LoadW4( &primitives[0].aabb.lowerBound.x + 5 );
+	b3FloatW4 upper = lower;
+
+	for ( int i = 1; i < count; ++i )
+	{
+		b3FloatW4 center = b3LoadW4( &primitives[i].aabb.lowerBound.x + 5 );
+		lower = b3PrimitiveMinW4( lower, center );
+		upper = b3PrimitiveMaxW4( upper, center );
+	}
+
+	return (b3AABB){ b3PrimitiveLanes( lower, 1 ), b3PrimitiveLanes( upper, 1 ) };
+}
+
+typedef struct b3Bucket
+{
+	b3FloatW4 lower;
+	b3FloatW4 upper;
+	int count;
+} b3Bucket;
+
+typedef struct b3Split
+{
+	b3AABB leftBounds;
+	b3AABB rightBounds;
+	int axis;
+	int index;
+} b3Split;
+
+static b3Split b3SplitBinnedSah( int count, b3Primitive* primitives )
+{
+	b3Split split;
+	split.axis = -1;
+	split.index = -1;
+
+	// Compute bounds of primitive centroids and choose split axis
+	b3AABB bounds = b3PrimitiveCenterBounds( primitives, count );
+	b3FloatW4 emptyLower = b3SplatW4( FLT_MAX );
+	b3FloatW4 emptyUpper = b3SplatW4( -FLT_MAX );
+
+	// Compute costs for splitting after each bucket and keep track of best split
+	// This is a small O(n^2) loop. This can be further optimized, but it is already
+	// very fast and is kept for simplicity right now.
+	int bestBucket = -1;
+	float bestCost = FLT_MAX;
+
+	b3Vec3 extent = b3AABB_Extents( bounds );
+	bool binAxis[3];
+	float factors[3];
+	b3Bucket axisBuckets[3][B3_BIN_COUNT];
+	for ( int axis = 0; axis < 3; ++axis )
+	{
+		binAxis[axis] = b3GetByIndex( extent, axis ) >= B3_LINEAR_SLOP;
+		factors[axis] = binAxis[axis] ? B3_BIN_COUNT * ( 1.0f - FLT_EPSILON ) /
+											( b3GetByIndex( bounds.upperBound, axis ) - b3GetByIndex( bounds.lowerBound, axis ) )
+									  : 0.0f;
+
+		for ( int i = 0; i < B3_BIN_COUNT; ++i )
+		{
+			axisBuckets[axis][i].lower = emptyLower;
+			axisBuckets[axis][i].upper = emptyUpper;
+			axisBuckets[axis][i].count = 0;
+		}
+	}
+
+	for ( int i = 0; i < count; ++i )
+	{
+		b3Vec3 center = primitives[i].center;
+		int indexX = (int)( factors[0] * ( center.x - bounds.lowerBound.x ) );
+		int indexY = (int)( factors[1] * ( center.y - bounds.lowerBound.y ) );
+		int indexZ = (int)( factors[2] * ( center.z - bounds.lowerBound.z ) );
+		B3_ASSERT( 0 <= indexX && indexX < B3_BIN_COUNT );
+		B3_ASSERT( 0 <= indexY && indexY < B3_BIN_COUNT );
+		B3_ASSERT( 0 <= indexZ && indexZ < B3_BIN_COUNT );
+
+		primitives[i].binIndex[0] = (int8_t)indexX;
+		primitives[i].binIndex[1] = (int8_t)indexY;
+		primitives[i].binIndex[2] = (int8_t)indexZ;
+
+		const float* p = &primitives[i].aabb.lowerBound.x;
+		b3FloatW4 lower = b3LoadW4( p );
+		b3FloatW4 upper = b3LoadW4( p + 2 );
+
+		b3Bucket* bucketX = axisBuckets[0] + indexX;
+		bucketX->count += 1;
+		bucketX->lower = b3PrimitiveMinW4( bucketX->lower, lower );
+		bucketX->upper = b3PrimitiveMaxW4( bucketX->upper, upper );
+
+		b3Bucket* bucketY = axisBuckets[1] + indexY;
+		bucketY->count += 1;
+		bucketY->lower = b3PrimitiveMinW4( bucketY->lower, lower );
+		bucketY->upper = b3PrimitiveMaxW4( bucketY->upper, upper );
+
+		b3Bucket* bucketZ = axisBuckets[2] + indexZ;
+		bucketZ->count += 1;
+		bucketZ->lower = b3PrimitiveMinW4( bucketZ->lower, lower );
+		bucketZ->upper = b3PrimitiveMaxW4( bucketZ->upper, upper );
+	}
+
+	for ( int axis = 0; axis < 3; ++axis )
+	{
+		if ( binAxis[axis] == false )
+		{
+			continue;
+		}
+
+		b3Bucket* buckets = axisBuckets[axis];
+
+		// Evaluate splits
+		for ( int i = 0; i < B3_BIN_COUNT - 1; ++i )
+		{
+			int leftCount = 0;
+			b3FloatW4 leftLower = emptyLower;
+			b3FloatW4 leftUpper = emptyUpper;
+			for ( int k = 0; k <= i; ++k )
+			{
+				leftCount += buckets[k].count;
+				leftLower = b3PrimitiveMinW4( leftLower, buckets[k].lower );
+				leftUpper = b3PrimitiveMaxW4( leftUpper, buckets[k].upper );
+			}
+
+			int rightCount = 0;
+			b3FloatW4 rightLower = emptyLower;
+			b3FloatW4 rightUpper = emptyUpper;
+			for ( int k = i + 1; k < B3_BIN_COUNT; ++k )
+			{
+				rightCount += buckets[k].count;
+				rightLower = b3PrimitiveMinW4( rightLower, buckets[k].lower );
+				rightUpper = b3PrimitiveMaxW4( rightUpper, buckets[k].upper );
+			}
+
+			b3AABB leftBounds = { b3PrimitiveLanes( leftLower, 0 ), b3PrimitiveLanes( leftUpper, 1 ) };
+			b3AABB rightBounds = { b3PrimitiveLanes( rightLower, 0 ), b3PrimitiveLanes( rightUpper, 1 ) };
+
+			B3_ASSERT( leftCount + rightCount == count );
+			if ( leftCount > 0 && rightCount > 0 )
+			{
+				float cost = leftCount * b3AABB_Area( leftBounds ) + rightCount * b3AABB_Area( rightBounds );
+
+				if ( cost < bestCost )
+				{
+					bestBucket = i;
+					bestCost = cost;
+
+					split.axis = axis;
+					split.index = leftCount;
+					split.leftBounds = leftBounds;
+					split.rightBounds = rightBounds;
+				}
+			}
+		}
+	}
+
+	// Partition
+	if ( bestBucket >= 0 )
+	{
+		int axis = split.axis;
+
+		int splitIndex = 0;
+		for ( int i = 0; i < count; ++i )
+		{
+			int index = primitives[i].binIndex[axis];
+
+			if ( index <= bestBucket )
+			{
+				b3Primitive temp = primitives[i];
+				primitives[i] = primitives[splitIndex];
+				primitives[splitIndex] = temp;
+				splitIndex++;
+			}
+		}
+		B3_ASSERT( splitIndex == split.index );
+	}
+
+	return split;
+}
+
+static b3Split b3SplitHalf( int count, b3Primitive* primitives )
+{
+	// Split in the middle
+	int splitIndex = count / 2;
+
+	b3AABB leftBounds = b3PrimitiveBounds( primitives, splitIndex );
+	b3AABB rightBounds = b3PrimitiveBounds( primitives + splitIndex, count - splitIndex );
+
+	b3AABB bounds = b3AABB_Union( leftBounds, rightBounds );
+	int axis = b3MajorAxis( b3AABB_Extents( bounds ) );
+
+	b3Split split;
+	split.axis = axis;
+	split.index = splitIndex;
+	split.leftBounds = leftBounds;
+	split.rightBounds = rightBounds;
+
+	return split;
+}
+
+static b3Split b3SplitMedian( int count, b3Primitive* primitives )
+{
+	B3_ASSERT( count > 2 );
+
+	b3AABB centerBounds = b3PrimitiveCenterBounds( primitives, count );
+	b3Vec3 lowerBound = centerBounds.lowerBound;
+	b3Vec3 upperBound = centerBounds.upperBound;
+
+	b3Vec3 d = b3Sub( upperBound, lowerBound );
+	b3Vec3 c = b3MulSV( 0.5f, b3Add( lowerBound, upperBound ) );
+
+	b3Split split = { 0 };
+	split.index = -1;
+
+	// Partition longest axis using the Hoare partition scheme
+	// https://en.wikipedia.org/wiki/Quicksort
+	// https://nicholasvadivelu.com/2021/01/11/array-partition/
+	int i1 = 0, i2 = count;
+	if ( d.x >= d.y && d.x >= d.z )
+	{
+		split.axis = 0;
+
+		float pivot = c.x;
+
+		while ( i1 < i2 )
+		{
+			while ( i1 < i2 && primitives[i1].center.x < pivot )
+			{
+				i1 += 1;
+			};
+
+			while ( i1 < i2 && primitives[i2 - 1].center.x >= pivot )
+			{
+				i2 -= 1;
+			};
+
+			if ( i1 < i2 )
+			{
+				// Swap primitives
+				b3Primitive temp = primitives[i1];
+				primitives[i1] = primitives[i2 - 1];
+				primitives[i2 - 1] = temp;
+
+				i1 += 1;
+				i2 -= 1;
+			}
+		}
+	}
+	else if ( d.y >= d.z )
+	{
+		split.axis = 1;
+
+		float pivot = c.y;
+
+		while ( i1 < i2 )
+		{
+			while ( i1 < i2 && primitives[i1].center.y < pivot )
+			{
+				i1 += 1;
+			};
+
+			while ( i1 < i2 && primitives[i2 - 1].center.y >= pivot )
+			{
+				i2 -= 1;
+			};
+
+			if ( i1 < i2 )
+			{
+				// Swap primitives
+				b3Primitive temp = primitives[i1];
+				primitives[i1] = primitives[i2 - 1];
+				primitives[i2 - 1] = temp;
+
+				i1 += 1;
+				i2 -= 1;
+			}
+		}
+	}
+	else
+	{
+		split.axis = 2;
+
+		float pivot = c.z;
+
+		while ( i1 < i2 )
+		{
+			while ( i1 < i2 && primitives[i1].center.z < pivot )
+			{
+				i1 += 1;
+			};
+
+			while ( i1 < i2 && primitives[i2 - 1].center.z >= pivot )
+			{
+				i2 -= 1;
+			};
+
+			if ( i1 < i2 )
+			{
+				// Swap primitives
+				b3Primitive temp = primitives[i1];
+				primitives[i1] = primitives[i2 - 1];
+				primitives[i2 - 1] = temp;
+
+				i1 += 1;
+				i2 -= 1;
+			}
+		}
+	}
+	B3_ASSERT( i1 == i2 );
+	B3_ASSERT( 0 <= i1 && i1 < count );
+
+	if ( i1 == 0 || i1 == count - 1 )
+	{
+		// failed to split
+		i1 = count / 2;
+	}
+
+	split.index = i1;
+	split.leftBounds = b3PrimitiveBounds( primitives, i1 );
+	split.rightBounds = b3PrimitiveBounds( primitives + i1, count - i1 );
+	return split;
+}
+
+#if B3_ENABLE_VALIDATION == 1
+
+static bool b3ValidateSplit( int count, b3Primitive* primitives, const b3Split* split )
+{
+	if ( split->axis < 0 )
+	{
+		return false;
+	}
+
+	for ( int i = 0; i < split->index; ++i )
+	{
+		if ( !b3AABB_Contains( split->leftBounds, primitives[i].aabb ) )
+		{
+			return false;
+		}
+	}
+
+	for ( int i = split->index; i < count; ++i )
+	{
+		if ( !b3AABB_Contains( split->rightBounds, primitives[i].aabb ) )
+		{
+			return false;
+		}
+	}
+
+	return true;
+}
+
+#endif
+
+static int b3BuildRecursive( b3Array( b3MeshNode ) * nodes, int count, b3Primitive* primitives, b3Primitive* base,
+							 bool useMedianSplit, int* height )
+{
+	if ( count > B3_DESIRED_TRIANGLES_PER_LEAF )
+	{
+		// Try to split the input set using the SAH
+		b3Split split;
+		if ( useMedianSplit )
+		{
+			split = b3SplitMedian( count, primitives );
+		}
+		else
+		{
+			split = b3SplitBinnedSah( count, primitives );
+		}
+
+		if ( split.axis < 0 )
+		{
+			if ( count > B3_MAXIMUM_TRIANGLES_PER_LEAF )
+			{
+				// Re-split. This is a less optimal split and can create more false positives!
+				split = b3SplitHalf( count, primitives );
+			}
+			else
+			{
+				b3AABB bounds = b3PrimitiveBounds( primitives, count );
+
+				// We have only a few triangles left. Create a leaf.
+				int index = b3Array_AddIndex( *nodes );
+				b3StoreLeaf( &nodes->data[index], &bounds, count, (int)( primitives - base ) );
+
+				return index;
+			}
+		}
+		B3_VALIDATE( b3ValidateSplit( count, primitives, &split ) );
+
+		// Allocate node and recurse
+		int index = b3Array_AddIndex( *nodes );
+		int heightLeft = 0, heightRight = 0;
+		int leftIndex = b3BuildRecursive( nodes, split.index, primitives, base, useMedianSplit, &heightLeft );
+		int rightIndex = b3BuildRecursive( nodes, count - split.index, primitives + split.index, base, useMedianSplit,
+										   &heightRight );
+
+		*height = b3MaxInt( heightLeft, heightRight ) + 1;
+
+		B3_UNUSED( leftIndex );
+		B3_ASSERT( leftIndex - index == 1 && rightIndex - index > 1 );
+
+		b3AABB aabb = b3AABB_Union( split.leftBounds, split.rightBounds );
+		b3MeshNode* node = b3Array_Get( *nodes, index );
+		node->data.asNode.axis = split.axis;
+		node->data.asNode.childOffset = rightIndex - index;
+		node->lowerBound = aabb.lowerBound;
+		node->upperBound = aabb.upperBound;
+
+		// Zero so mesh->hash is deterministic
+		node->triangleOffset = 0;
+
+		return index;
+	}
+
+	b3AABB aabb = b3PrimitiveBounds( primitives, count );
+
+	int index = b3Array_AddIndex( *nodes );
+	b3StoreLeaf( &nodes->data[index], &aabb, count, (int)( primitives - base ) );
+
+	*height = 1;
+
+	return index;
+}
+
+static bool b3SortMeshTriangles( b3MeshData* mesh )
+{
+	b3MeshTriangle* triangles = b3GetMeshTrianglesWrite( mesh );
+	uint8_t* materialIndices = b3GetMeshMaterialIndicesWrite( mesh );
+
+	// Sort triangles in depth-first-order
+	int offset = 0;
+	b3Array( b3MeshTriangle ) tempTriangles;
+	b3Array_CreateN( tempTriangles, mesh->triangleCount );
+
+	b3Array( uint8_t ) tempMaterialIndices;
+	b3Array_CreateN( tempMaterialIndices, mesh->triangleCount );
+
+	int count = 0;
+	b3MeshNode* stack[B3_MESH_STACK_SIZE];
+	stack[count++] = b3GetRootWrite( mesh );
+
+	while ( count > 0 )
+	{
+		b3MeshNode* node = stack[--count];
+
+		if ( b3IsLeaf( node ) == false )
+		{
+			if ( count >= B3_MESH_STACK_SIZE - 2 )
+			{
+				return false;
+			}
+
+			stack[count++] = b3GetRightChildWrite( node );
+			stack[count++] = b3GetLeftChildWrite( node );
+		}
+		else
+		{
+			int triangleCount = node->data.asLeaf.triangleCount;
+			int triangleOffset = node->triangleOffset;
+
+			for ( int triangle = 0; triangle < triangleCount; ++triangle )
+			{
+				int index = triangleOffset + triangle;
+				b3Array_Push( tempTriangles, triangles[index] );
+				b3Array_Push( tempMaterialIndices, materialIndices[index] );
+			}
+
+			node->triangleOffset = offset;
+			offset += triangleCount;
+		}
+	}
+
+	B3_ASSERT( offset == tempTriangles.count );
+	B3_ASSERT( tempTriangles.count == mesh->triangleCount );
+	B3_ASSERT( tempMaterialIndices.count == mesh->triangleCount );
+
+	// Copy sorted triangle array back to tree
+	memcpy( triangles, tempTriangles.data, mesh->triangleCount * sizeof( b3MeshTriangle ) );
+	memcpy( materialIndices, tempMaterialIndices.data, mesh->triangleCount * sizeof( uint8_t ) );
+
+	b3Array_Destroy( tempTriangles );
+	b3Array_Destroy( tempMaterialIndices );
+
+	return true;
+}
+
+typedef struct
+{
+	int vertex1;
+	int vertex2;
+	int triangle1;
+	int triangle2;
+	uint16_t triangleCount;
+
+	// The index of an edge within the parent triangle: 0, 1, or 2. 0xFF is unset
+	uint8_t triangleEdgeIndex1;
+	uint8_t triangleEdgeIndex2;
+} b3MeshEdge;
+
+#define B3_EDGE_ANGLE_STEPS 127.0f
+
+// Lookup table for 8-bit compressed triangle neighbor angles.
+static const b3CosSin s_quantizedCosSin[255] = {
+	{ 1.0f, 0.0f },
+	{ 0.9999235f, 0.012368159f },
+	{ 0.99969405f, 0.024734428f },
+	{ 0.9993117f, 0.03709691f },
+	{ 0.99877644f, 0.04945372f },
+	{ 0.99808836f, 0.061802965f },
+	{ 0.99724764f, 0.074142754f },
+	{ 0.9962543f, 0.0864712f },
+	{ 0.99510866f, 0.09878642f },
+	{ 0.9938107f, 0.111086525f },
+	{ 0.9923608f, 0.12336964f },
+	{ 0.990759f, 0.13563387f },
+	{ 0.9890057f, 0.14787737f },
+	{ 0.9871011f, 0.16009824f },
+	{ 0.9850455f, 0.17229462f },
+	{ 0.98283917f, 0.18446463f },
+	{ 0.98048246f, 0.19660644f },
+	{ 0.97797585f, 0.20871817f },
+	{ 0.97531956f, 0.22079796f },
+	{ 0.9725141f, 0.23284398f },
+	{ 0.96955985f, 0.24485438f },
+	{ 0.9664573f, 0.25682732f },
+	{ 0.9632069f, 0.26876098f },
+	{ 0.9598091f, 0.2806535f },
+	{ 0.95626456f, 0.29250312f },
+	{ 0.9525737f, 0.304308f },
+	{ 0.9487371f, 0.3160663f },
+	{ 0.9447554f, 0.32777625f },
+	{ 0.9406291f, 0.33943605f },
+	{ 0.936359f, 0.35104394f },
+	{ 0.9319456f, 0.36259815f },
+	{ 0.9273896f, 0.37409684f },
+	{ 0.9226918f, 0.38553834f },
+	{ 0.9178528f, 0.39692086f },
+	{ 0.91287345f, 0.40824264f },
+	{ 0.9077544f, 0.419502f },
+	{ 0.9024965f, 0.43069714f },
+	{ 0.89710057f, 0.44182643f },
+	{ 0.89156735f, 0.4528881f },
+	{ 0.88589776f, 0.4638805f },
+	{ 0.8800927f, 0.47480196f },
+	{ 0.8741529f, 0.48565078f },
+	{ 0.8680794f, 0.4964253f },
+	{ 0.8618732f, 0.5071239f },
+	{ 0.8555351f, 0.51774484f },
+	{ 0.8490661f, 0.52828664f },
+	{ 0.8424672f, 0.5387476f },
+	{ 0.83573943f, 0.5491262f },
+	{ 0.8288838f, 0.55942076f },
+	{ 0.82190144f, 0.5696297f },
+	{ 0.8147933f, 0.57975155f },
+	{ 0.8075605f, 0.58978474f },
+	{ 0.8002042f, 0.59972763f },
+	{ 0.79272544f, 0.60957885f },
+	{ 0.78512543f, 0.6193367f },
+	{ 0.7774054f, 0.62899995f },
+	{ 0.7695663f, 0.6385669f },
+	{ 0.76160955f, 0.6480362f },
+	{ 0.7535363f, 0.65740633f },
+	{ 0.74534774f, 0.66667587f },
+	{ 0.73704517f, 0.6758435f },
+	{ 0.7286299f, 0.6849077f },
+	{ 0.7201031f, 0.6938671f },
+	{ 0.71146613f, 0.70272034f },
+	{ 0.70272034f, 0.71146613f },
+	{ 0.6938671f, 0.7201031f },
+	{ 0.6849077f, 0.7286299f },
+	{ 0.6758435f, 0.73704517f },
+	{ 0.66667587f, 0.74534774f },
+	{ 0.65740633f, 0.7535363f },
+	{ 0.6480362f, 0.76160955f },
+	{ 0.6385669f, 0.7695663f },
+	{ 0.62899995f, 0.7774054f },
+	{ 0.6193367f, 0.78512543f },
+	{ 0.60957885f, 0.79272544f },
+	{ 0.59972763f, 0.8002042f },
+	{ 0.58978474f, 0.8075605f },
+	{ 0.57975155f, 0.8147933f },
+	{ 0.5696297f, 0.82190144f },
+	{ 0.55942076f, 0.8288838f },
+	{ 0.5491262f, 0.83573943f },
+	{ 0.5387476f, 0.8424672f },
+	{ 0.52828664f, 0.8490661f },
+	{ 0.51774484f, 0.8555351f },
+	{ 0.5071239f, 0.8618732f },
+	{ 0.4964253f, 0.8680794f },
+	{ 0.48565078f, 0.8741529f },
+	{ 0.47480196f, 0.8800927f },
+	{ 0.4638805f, 0.88589776f },
+	{ 0.4528881f, 0.89156735f },
+	{ 0.44182643f, 0.89710057f },
+	{ 0.43069714f, 0.9024965f },
+	{ 0.419502f, 0.9077544f },
+	{ 0.40824264f, 0.91287345f },
+	{ 0.39692086f, 0.9178528f },
+	{ 0.38553834f, 0.9226918f },
+	{ 0.37409684f, 0.9273896f },
+	{ 0.36259815f, 0.9319456f },
+	{ 0.35104394f, 0.936359f },
+	{ 0.33943605f, 0.9406291f },
+	{ 0.32777625f, 0.9447554f },
+	{ 0.3160663f, 0.9487371f },
+	{ 0.304308f, 0.9525737f },
+	{ 0.29250312f, 0.95626456f },
+	{ 0.2806535f, 0.9598091f },
+	{ 0.26876098f, 0.9632069f },
+	{ 0.25682732f, 0.9664573f },
+	{ 0.24485438f, 0.96955985f },
+	{ 0.23284398f, 0.9725141f },
+	{ 0.22079796f, 0.97531956f },
+	{ 0.20871817f, 0.97797585f },
+	{ 0.19660644f, 0.98048246f },
+	{ 0.18446463f, 0.98283917f },
+	{ 0.17229462f, 0.9850455f },
+	{ 0.16009824f, 0.9871011f },
+	{ 0.14787737f, 0.9890057f },
+	{ 0.13563387f, 0.990759f },
+	{ 0.12336964f, 0.9923608f },
+	{ 0.111086525f, 0.9938107f },
+	{ 0.09878642f, 0.99510866f },
+	{ 0.0864712f, 0.9962543f },
+	{ 0.074142754f, 0.99724764f },
+	{ 0.061802965f, 0.99808836f },
+	{ 0.04945372f, 0.99877644f },
+	{ 0.03709691f, 0.9993117f },
+	{ 0.024734428f, 0.99969405f },
+	{ 0.012368159f, 0.9999235f },
+	{ 0.0f, 1.0f },
+	{ -0.012368159f, 0.9999235f },
+	{ -0.024734428f, 0.99969405f },
+	{ -0.03709691f, 0.9993117f },
+	{ -0.04945372f, 0.99877644f },
+	{ -0.061802965f, 0.99808836f },
+	{ -0.074142754f, 0.99724764f },
+	{ -0.0864712f, 0.9962543f },
+	{ -0.09878642f, 0.99510866f },
+	{ -0.111086525f, 0.9938107f },
+	{ -0.12336964f, 0.9923608f },
+	{ -0.13563387f, 0.990759f },
+	{ -0.14787737f, 0.9890057f },
+	{ -0.16009824f, 0.9871011f },
+	{ -0.17229462f, 0.9850455f },
+	{ -0.18446463f, 0.98283917f },
+	{ -0.19660644f, 0.98048246f },
+	{ -0.20871817f, 0.97797585f },
+	{ -0.22079796f, 0.97531956f },
+	{ -0.23284398f, 0.9725141f },
+	{ -0.24485438f, 0.96955985f },
+	{ -0.25682732f, 0.9664573f },
+	{ -0.26876098f, 0.9632069f },
+	{ -0.2806535f, 0.9598091f },
+	{ -0.29250312f, 0.95626456f },
+	{ -0.304308f, 0.9525737f },
+	{ -0.3160663f, 0.9487371f },
+	{ -0.32777625f, 0.9447554f },
+	{ -0.33943605f, 0.9406291f },
+	{ -0.35104394f, 0.936359f },
+	{ -0.36259815f, 0.9319456f },
+	{ -0.37409684f, 0.9273896f },
+	{ -0.38553834f, 0.9226918f },
+	{ -0.39692086f, 0.9178528f },
+	{ -0.40824264f, 0.91287345f },
+	{ -0.419502f, 0.9077544f },
+	{ -0.43069714f, 0.9024965f },
+	{ -0.44182643f, 0.89710057f },
+	{ -0.4528881f, 0.89156735f },
+	{ -0.4638805f, 0.88589776f },
+	{ -0.47480196f, 0.8800927f },
+	{ -0.48565078f, 0.8741529f },
+	{ -0.4964253f, 0.8680794f },
+	{ -0.5071239f, 0.8618732f },
+	{ -0.51774484f, 0.8555351f },
+	{ -0.52828664f, 0.8490661f },
+	{ -0.5387476f, 0.8424672f },
+	{ -0.5491262f, 0.83573943f },
+	{ -0.55942076f, 0.8288838f },
+	{ -0.5696297f, 0.82190144f },
+	{ -0.57975155f, 0.8147933f },
+	{ -0.58978474f, 0.8075605f },
+	{ -0.59972763f, 0.8002042f },
+	{ -0.60957885f, 0.79272544f },
+	{ -0.6193367f, 0.78512543f },
+	{ -0.62899995f, 0.7774054f },
+	{ -0.6385669f, 0.7695663f },
+	{ -0.6480362f, 0.76160955f },
+	{ -0.65740633f, 0.7535363f },
+	{ -0.66667587f, 0.74534774f },
+	{ -0.6758435f, 0.73704517f },
+	{ -0.6849077f, 0.7286299f },
+	{ -0.6938671f, 0.7201031f },
+	{ -0.70272034f, 0.71146613f },
+	{ -0.71146613f, 0.70272034f },
+	{ -0.7201031f, 0.6938671f },
+	{ -0.7286299f, 0.6849077f },
+	{ -0.73704517f, 0.6758435f },
+	{ -0.74534774f, 0.66667587f },
+	{ -0.7535363f, 0.65740633f },
+	{ -0.76160955f, 0.6480362f },
+	{ -0.7695663f, 0.6385669f },
+	{ -0.7774054f, 0.62899995f },
+	{ -0.78512543f, 0.6193367f },
+	{ -0.79272544f, 0.60957885f },
+	{ -0.8002042f, 0.59972763f },
+	{ -0.8075605f, 0.58978474f },
+	{ -0.8147933f, 0.57975155f },
+	{ -0.82190144f, 0.5696297f },
+	{ -0.8288838f, 0.55942076f },
+	{ -0.83573943f, 0.5491262f },
+	{ -0.8424672f, 0.5387476f },
+	{ -0.8490661f, 0.52828664f },
+	{ -0.8555351f, 0.51774484f },
+	{ -0.8618732f, 0.5071239f },
+	{ -0.8680794f, 0.4964253f },
+	{ -0.8741529f, 0.48565078f },
+	{ -0.8800927f, 0.47480196f },
+	{ -0.88589776f, 0.4638805f },
+	{ -0.89156735f, 0.4528881f },
+	{ -0.89710057f, 0.44182643f },
+	{ -0.9024965f, 0.43069714f },
+	{ -0.9077544f, 0.419502f },
+	{ -0.91287345f, 0.40824264f },
+	{ -0.9178528f, 0.39692086f },
+	{ -0.9226918f, 0.38553834f },
+	{ -0.9273896f, 0.37409684f },
+	{ -0.9319456f, 0.36259815f },
+	{ -0.936359f, 0.35104394f },
+	{ -0.9406291f, 0.33943605f },
+	{ -0.9447554f, 0.32777625f },
+	{ -0.9487371f, 0.3160663f },
+	{ -0.9525737f, 0.304308f },
+	{ -0.95626456f, 0.29250312f },
+	{ -0.9598091f, 0.2806535f },
+	{ -0.9632069f, 0.26876098f },
+	{ -0.9664573f, 0.25682732f },
+	{ -0.96955985f, 0.24485438f },
+	{ -0.9725141f, 0.23284398f },
+	{ -0.97531956f, 0.22079796f },
+	{ -0.97797585f, 0.20871817f },
+	{ -0.98048246f, 0.19660644f },
+	{ -0.98283917f, 0.18446463f },
+	{ -0.9850455f, 0.17229462f },
+	{ -0.9871011f, 0.16009824f },
+	{ -0.9890057f, 0.14787737f },
+	{ -0.990759f, 0.13563387f },
+	{ -0.9923608f, 0.12336964f },
+	{ -0.9938107f, 0.111086525f },
+	{ -0.99510866f, 0.09878642f },
+	{ -0.9962543f, 0.0864712f },
+	{ -0.99724764f, 0.074142754f },
+	{ -0.99808836f, 0.061802965f },
+	{ -0.99877644f, 0.04945372f },
+	{ -0.9993117f, 0.03709691f },
+	{ -0.99969405f, 0.024734428f },
+	{ -0.9999235f, 0.012368159f },
+	{ -1.0f, 0.0f },
+};
+
+static b3CosSin b3GetQuantizedCosSin( int code )
+{
+	B3_ASSERT( -254 <= code && code <= 254 );
+	int index = b3MinInt( code < 0 ? -code : code, 254 );
+	b3CosSin cs = s_quantizedCosSin[index];
+	if ( code < 0 )
+	{
+		cs.sine = -cs.sine;
+	}
+
+	return cs;
+}
+
+int8_t b3QuantizeEdgeAngle( float radians )
+{
+	float scaled = radians * ( B3_EDGE_ANGLE_STEPS / B3_PI );
+	int quantized = scaled >= 0.0f ? (int)( scaled + 0.5f ) : -(int)( 0.5f - scaled );
+	return (int8_t)b3ClampInt( quantized, -127, 127 );
+}
+
+// Ring of mesh-space edge directions in 16-bit octahedral encoding.
+typedef struct b3VertexRing
+{
+	// Number of boundary edges with 90 degree cliffs.
+	uint16_t cliffCount;
+} b3VertexRing;
+
+typedef struct b3VertexRingEntry
+{
+	// Octohedral encoded edge direction.
+	uint16_t code;
+} b3VertexRingEntry;
+
+static b3Vec3 b3FoldOctahedral( float x, float y )
+{
+	return (b3Vec3){
+		( 1.0f - b3AbsFloat( y ) ) * ( x >= 0.0f ? 1.0f : -1.0f ),
+		( 1.0f - b3AbsFloat( x ) ) * ( y >= 0.0f ? 1.0f : -1.0f ),
+		0.0f,
+	};
+}
+
+static b3Vec3 b3DecodeRingDirection( uint16_t code )
+{
+	float x = (float)( code & 0xFF ) * ( 2.0f / 255.0f ) - 1.0f;
+	float y = (float)( code >> 8 ) * ( 2.0f / 255.0f ) - 1.0f;
+	float z = 1.0f - b3AbsFloat( x ) - b3AbsFloat( y );
+	if ( z < 0.0f )
+	{
+		b3Vec3 folded = b3FoldOctahedral( x, y );
+		x = folded.x;
+		y = folded.y;
+	}
+
+	return b3Normalize( (b3Vec3){ x, y, z } );
+}
+
+typedef struct b3RingEncoder
+{
+	float* x;
+	float* y;
+	float* z;
+	b3VertexRingEntry* entries;
+	int count;
+	int capacity;
+} b3RingEncoder;
+
+static void b3PushRingEntry( b3RingEncoder* encoder, b3Vec3 direction )
+{
+	int index = encoder->count;
+	B3_ASSERT( index < encoder->capacity );
+	encoder->x[index] = direction.x;
+	encoder->y[index] = direction.y;
+	encoder->z[index] = direction.z;
+	encoder->count = index + 1;
+}
+
+static void b3EncodeRingEntries( b3RingEncoder* encoder )
+{
+	float* xs = encoder->x;
+	float* ys = encoder->y;
+	float* zs = encoder->z;
+	int count = encoder->count;
+
+	int paddedCount = ( count + 3 ) & ~3;
+	B3_ASSERT( paddedCount <= encoder->capacity );
+	for ( int i = count; i < paddedCount; ++i )
+	{
+		xs[i] = 0.0f;
+		ys[i] = 0.0f;
+		zs[i] = 1.0f;
+	}
+
+	for ( int i = 0; i < count; i += 4 )
+	{
+		b3FloatW4 x = b3LoadW4( xs + i );
+		b3FloatW4 y = b3LoadW4( ys + i );
+		b3FloatW4 z = b3LoadW4( zs + i );
+		b3FloatW4 zero = b3ZeroW4();
+		b3FloatW4 one = b3SplatW4( 1.0f );
+		b3FloatW4 minusOne = b3SplatW4( -1.0f );
+		b3FloatW4 sum = b3AddW4( b3AddW4( b3AbsW4( x ), b3AbsW4( y ) ), b3AbsW4( z ) );
+		b3FloatW4 ox = b3DivW4( x, sum );
+		b3FloatW4 oy = b3DivW4( y, sum );
+		b3FloatW4 fx = b3MulW4( b3SubW4( one, b3AbsW4( oy ) ), b3BlendW4( one, minusOne, b3LessThanW4( ox, zero ) ) );
+		b3FloatW4 fy = b3MulW4( b3SubW4( one, b3AbsW4( ox ) ), b3BlendW4( one, minusOne, b3LessThanW4( oy, zero ) ) );
+		b3FloatW4 below = b3LessThanW4( z, zero );
+		ox = b3BlendW4( ox, fx, below );
+		oy = b3BlendW4( oy, fy, below );
+		b3FloatW4 scale = b3SplatW4( 127.5f );
+		b3FloatW4 half = b3SplatW4( 0.5f );
+		b3StoreW4( xs + i, b3AddW4( b3MulW4( scale, b3AddW4( ox, one ) ), half ) );
+		b3StoreW4( ys + i, b3AddW4( b3MulW4( scale, b3AddW4( oy, one ) ), half ) );
+	}
+
+	for ( int i = 0; i < count; ++i )
+	{
+		int u = b3ClampInt( (int)xs[i], 0, 255 );
+		int v = b3ClampInt( (int)ys[i], 0, 255 );
+		encoder->entries[i].code = (uint16_t)( u | ( v << 8 ) );
+	}
+}
+
+bool b3GetMeshNeighborNormal( const b3Mesh* mesh, int triangleIndex, int edgeIndex, b3Vec3* normal )
+{
+	const b3MeshData* data = mesh->data;
+	B3_ASSERT( 0 <= triangleIndex && triangleIndex < data->triangleCount );
+	B3_ASSERT( 0 <= edgeIndex && edgeIndex < 3 );
+
+	const int8_t* edgeAngles = b3GetMeshEdgeAngles( data );
+	if ( edgeAngles == NULL )
+	{
+		return false;
+	}
+
+	b3Vec3 scale = mesh->scale;
+	if ( scale.x * scale.y * scale.z < 0.0f )
+	{
+		// Reflected mesh.
+		edgeIndex = 2 - edgeIndex;
+	}
+
+	int8_t quantized = edgeAngles[3 * triangleIndex + edgeIndex];
+	if ( quantized == B3_BOUNDARY_EDGE_ANGLE )
+	{
+		return false;
+	}
+
+	const b3MeshTriangle* triangles = b3GetMeshTriangles( data );
+	const b3Vec3* vertices = b3GetMeshVertices( data );
+	b3MeshTriangle triangle = triangles[triangleIndex];
+	int indices[3] = { triangle.index1, triangle.index2, triangle.index3 };
+
+	b3Vec3 a = vertices[indices[edgeIndex]];
+	b3Vec3 b = vertices[indices[( edgeIndex + 1 ) % 3]];
+	b3Vec3 c = vertices[indices[( edgeIndex + 2 ) % 3]];
+	b3Vec3 n = b3Normalize( b3Cross( b3Sub( b, a ), b3Sub( c, a ) ) );
+	b3Vec3 outward = b3Cross( b3Normalize( b3Sub( b, a ) ), n );
+
+	b3CosSin cs = b3GetQuantizedCosSin( 2 * quantized );
+	b3Vec3 unscaled = b3Add( b3MulSV( cs.cosine, n ), b3MulSV( cs.sine, outward ) );
+
+	b3Vec3 absScale = b3Abs( scale );
+	if ( absScale.y == absScale.x && absScale.z == absScale.x )
+	{
+		// Shortcut for uniform scale. Common case.
+		*normal = (b3Vec3){
+			scale.x < 0.0f ? -unscaled.x : unscaled.x,
+			scale.y < 0.0f ? -unscaled.y : unscaled.y,
+			scale.z < 0.0f ? -unscaled.z : unscaled.z,
+		};
+		return true;
+	}
+
+	// Handle non-uniform scale.
+	b3Vec3 invScale = { 1.0f / scale.x, 1.0f / scale.y, 1.0f / scale.z };
+	*normal = b3Normalize( b3Mul( invScale, unscaled ) );
+	return true;
+}
+
+static int b3GetMeshVertexIndex( const b3Mesh* mesh, b3MeshTriangle triangle, int vertexIndex )
+{
+	b3Vec3 scale = mesh->scale;
+	if ( scale.x * scale.y * scale.z < 0.0f )
+	{
+		// Handle reflection.
+		vertexIndex = ( 3 - vertexIndex ) % 3;
+	}
+
+	int indices[3] = { triangle.index1, triangle.index2, triangle.index3 };
+	return indices[vertexIndex];
+}
+
+int b3GetMeshVertexFlag( const b3Mesh* mesh, int triangleIndex, int vertexIndex )
+{
+	const b3MeshData* data = mesh->data;
+	B3_ASSERT( 0 <= triangleIndex && triangleIndex < data->triangleCount );
+	B3_ASSERT( 0 <= vertexIndex && vertexIndex < 3 );
+
+	const uint8_t* vertexFlags = b3GetMeshVertexFlags( data );
+	if ( vertexFlags == NULL )
+	{
+		return b3_flatVertex;
+	}
+
+	b3MeshTriangle triangle = b3GetMeshTriangles( data )[triangleIndex];
+	int index = b3GetMeshVertexIndex( mesh, triangle, vertexIndex );
+	return vertexFlags[index];
+}
+
+// Is the candidate manifold normal in vertex Voronoi region?
+bool b3IsInMeshVertexRing( const b3Mesh* mesh, int triangleIndex, int vertexIndex, b3Vec3 normal, float tolerance )
+{
+	const b3MeshData* data = mesh->data;
+	B3_ASSERT( 0 <= triangleIndex && triangleIndex < data->triangleCount );
+	B3_ASSERT( 0 <= vertexIndex && vertexIndex < 3 );
+
+	if ( data->vertexRingOffset == 0 )
+	{
+		return true;
+	}
+
+	const b3MeshTriangle* triangles = b3GetMeshTriangles( data );
+	b3MeshTriangle triangle = triangles[triangleIndex];
+	int vertex = b3GetMeshVertexIndex( mesh, triangle, vertexIndex );
+
+	// Account for the mesh scale, including reflection. The cliff scale is separate
+	// to maintain the 90 degree angle that all cliffs use.
+	b3Vec3 scale = mesh->scale;
+	b3Vec3 edgeScale, cliffScale;
+	b3Vec3 absScale = b3Abs( scale );
+	bool uniform = absScale.y == absScale.x && absScale.z == absScale.x;
+	if ( uniform )
+	{
+		edgeScale =
+			(b3Vec3){ scale.x < 0.0f ? -1.0f : 1.0f, scale.y < 0.0f ? -1.0f : 1.0f, scale.z < 0.0f ? -1.0f : 1.0f };
+		cliffScale = edgeScale;
+	}
+	else
+	{
+		edgeScale = scale;
+		cliffScale = (b3Vec3){ 1.0f / scale.x, 1.0f / scale.y, 1.0f / scale.z };
+	}
+
+	const int* starts = (const int*)( (intptr_t)data + data->vertexRingOffset );
+	int byteCount = starts[vertex + 1] - starts[vertex];
+	if ( byteCount == 0 )
+	{
+		// Flat vertex
+		const b3Vec3* vertices = b3GetMeshVertices( data );
+		b3Vec3 faceNormal =
+			b3MakeNormalFromPoints( vertices[triangle.index1], vertices[triangle.index2], vertices[triangle.index3] );
+		faceNormal = b3Normalize( b3Mul( cliffScale, faceNormal ) );
+		float cosAngle = b3Dot( normal, faceNormal );
+		return cosAngle > 0.0f && cosAngle * cosAngle >= 1.0f - tolerance * tolerance;
+	}
+
+	const b3VertexRing* ring = (const b3VertexRing*)( (intptr_t)data + starts[vertex] );
+	const b3VertexRingEntry* entries = (const b3VertexRingEntry*)( ring + 1 );
+	int entryCount = ( byteCount - (int)sizeof( b3VertexRing ) ) / (int)sizeof( b3VertexRingEntry );
+	int edgeCount = entryCount - ring->cliffCount;
+
+	b3Vec3 edgeNormal = b3Mul( edgeScale, normal );
+	b3Vec3 cliffNormal = b3Mul( cliffScale, normal );
+
+	for ( int i = 0; i < entryCount; ++i )
+	{
+		bool isCliff = i >= edgeCount;
+		b3Vec3 direction = b3DecodeRingDirection( entries[i].code );
+		float lean = b3Dot( isCliff ? cliffNormal : edgeNormal, direction );
+
+		float limit = tolerance;
+		if ( uniform == false )
+		{
+			limit *= b3Length( b3Mul( isCliff ? cliffScale : edgeScale, direction ) );
+		}
+
+		if ( lean > limit )
+		{
+			return false;
+		}
+	}
+
+	return true;
+}
+
+static void b3IdentifyEdges( b3MeshData* mesh, b3Vec3* normals )
+{
+	b3MeshTriangle* triangles = b3GetMeshTrianglesWrite( mesh );
+	const b3Vec3* vertices = b3GetMeshVertices( mesh );
+	uint8_t* flags = b3GetMeshFlagsWrite( mesh );
+	int8_t* edgeAngles = b3GetMeshEdgeAnglesWrite( mesh );
+	B3_ASSERT( edgeAngles != NULL );
+
+	int triangleCount = mesh->triangleCount;
+	int edgeCount = 3 * triangleCount;
+
+	for ( int i = 0; i < edgeCount; ++i )
+	{
+		edgeAngles[i] = B3_BOUNDARY_EDGE_ANGLE;
+	}
+
+	b3MeshEdge* edges = B3_ALLOC( b3MeshEdge, edgeCount );
+
+	for ( int i = 0; i < triangleCount; ++i )
+	{
+		b3MeshTriangle* triangle = triangles + i;
+		int i1 = triangle->index1;
+		int i2 = triangle->index2;
+		int i3 = triangle->index3;
+
+		edges[3 * i + 0].vertex1 = b3MinInt( i1, i2 );
+		edges[3 * i + 0].vertex2 = b3MaxInt( i1, i2 );
+		edges[3 * i + 0].triangle1 = i;
+		edges[3 * i + 0].triangle2 = B3_NULL_INDEX;
+		edges[3 * i + 0].triangleEdgeIndex1 = 0;
+		edges[3 * i + 0].triangleEdgeIndex2 = 0xFF;
+		edges[3 * i + 0].triangleCount = 1;
+
+		edges[3 * i + 1].vertex1 = b3MinInt( i2, i3 );
+		edges[3 * i + 1].vertex2 = b3MaxInt( i2, i3 );
+		edges[3 * i + 1].triangle1 = i;
+		edges[3 * i + 1].triangle2 = B3_NULL_INDEX;
+		edges[3 * i + 1].triangleEdgeIndex1 = 1;
+		edges[3 * i + 1].triangleEdgeIndex2 = 0xFF;
+		edges[3 * i + 1].triangleCount = 1;
+
+		edges[3 * i + 2].vertex1 = b3MinInt( i3, i1 );
+		edges[3 * i + 2].vertex2 = b3MaxInt( i3, i1 );
+		edges[3 * i + 2].triangle1 = i;
+		edges[3 * i + 2].triangle2 = B3_NULL_INDEX;
+		edges[3 * i + 2].triangleEdgeIndex1 = 2;
+		edges[3 * i + 2].triangleEdgeIndex2 = 0xFF;
+		edges[3 * i + 2].triangleCount = 1;
+
+		b3Vec3 v1 = vertices[i1];
+		b3Vec3 v2 = vertices[i2];
+		b3Vec3 v3 = vertices[i3];
+
+		b3Vec3 e1 = b3Sub( v2, v1 );
+		b3Vec3 e2 = b3Sub( v3, v1 );
+		b3Vec3 n = b3Cross( e1, e2 );
+
+		normals[i] = b3Normalize( n );
+	}
+
+	// Counting sort for edges. Faster than a hashtable.
+	int vertexCount = mesh->vertexCount;
+	int* edgeStarts = B3_ALLOC( int, ( vertexCount + 1 ) );
+	int* sortedEdges = B3_ALLOC( int, edgeCount );
+	int* stamps = B3_ALLOC( int, vertexCount );
+	int* firstEdges = B3_ALLOC( int, vertexCount );
+
+	for ( int i = 0; i <= vertexCount; ++i )
+	{
+		edgeStarts[i] = 0;
+	}
+
+	for ( int i = 0; i < vertexCount; ++i )
+	{
+		stamps[i] = B3_NULL_INDEX;
+	}
+
+	for ( int i = 0; i < edgeCount; ++i )
+	{
+		B3_ASSERT( 0 <= edges[i].vertex1 && edges[i].vertex2 < vertexCount );
+		edgeStarts[edges[i].vertex1 + 1] += 1;
+	}
+
+	for ( int i = 0; i < vertexCount; ++i )
+	{
+		edgeStarts[i + 1] += edgeStarts[i];
+	}
+
+	for ( int i = 0; i < edgeCount; ++i )
+	{
+		int vertex1 = edges[i].vertex1;
+		sortedEdges[edgeStarts[vertex1]] = i;
+		edgeStarts[vertex1] += 1;
+	}
+
+	// Find unique edges and assign adjacency
+	int begin = 0;
+	for ( int vertex1 = 0; vertex1 < vertexCount; ++vertex1 )
+	{
+		int end = edgeStarts[vertex1];
+		for ( int j = begin; j < end; ++j )
+		{
+			int i = sortedEdges[j];
+			b3MeshEdge* edge = edges + i;
+			int vertex2 = edge->vertex2;
+
+			// Establish twin.
+			if ( stamps[vertex2] != vertex1 )
+			{
+				stamps[vertex2] = vertex1;
+				firstEdges[vertex2] = i;
+				continue;
+			}
+
+			int otherIndex = firstEdges[vertex2];
+			B3_ASSERT( otherIndex < i );
+
+			b3MeshEdge* base = edges + otherIndex;
+			if ( base->triangleCount == 1 )
+			{
+				base->triangle2 = edge->triangle1;
+				base->triangleEdgeIndex2 = edge->triangleEdgeIndex1;
+			}
+
+			base->triangleCount += 1;
+		}
+
+		begin = end;
+	}
+
+	B3_FREE( firstEdges, int, vertexCount );
+	B3_FREE( stamps, int, vertexCount );
+	B3_FREE( sortedEdges, int, edgeCount );
+	B3_FREE( edgeStarts, int, ( vertexCount + 1 ) );
+
+	int angleCapacity = ( edgeCount / 2 + 3 ) & ~3;
+	float* angleYs = B3_ALLOC( float, angleCapacity );
+	float* angleXs = B3_ALLOC( float, angleCapacity );
+	float* angleLengthSqs = B3_ALLOC( float, angleCapacity );
+	int* angleSlots = B3_ALLOC( int, 2 * angleCapacity );
+	int angleCount = 0;
+
+	for ( int i = 0; i < edgeCount; ++i )
+	{
+		b3MeshEdge* edge = edges + i;
+		if ( edge->triangleCount != 2 )
+		{
+			continue;
+		}
+
+		B3_ASSERT( edge->triangleEdgeIndex1 < 3 );
+		B3_ASSERT( edge->triangleEdgeIndex2 < 3 );
+
+		b3MeshTriangle* triangle1 = triangles + edge->triangle1;
+		b3MeshTriangle* triangle2 = triangles + edge->triangle2;
+		uint8_t* flag1 = flags + edge->triangle1;
+		uint8_t* flag2 = flags + edge->triangle2;
+
+		int j1 = triangle2->index1;
+		int j2 = triangle2->index2;
+		int j3 = triangle2->index3;
+
+		int opposite = B3_NULL_INDEX;
+
+		switch ( edge->triangleEdgeIndex2 )
+		{
+			case 0:
+				opposite = j3;
+				break;
+
+			case 1:
+				opposite = j1;
+				break;
+
+			case 2:
+				opposite = j2;
+				break;
+
+			default:
+				B3_ASSERT( false );
+		}
+
+		int i1 = triangle1->index1;
+		int i2 = triangle1->index2;
+		int i3 = triangle1->index3;
+
+		b3Vec3 v1 = vertices[i1];
+		b3Vec3 v2 = vertices[i2];
+		b3Vec3 v3 = vertices[i3];
+		b3Vec3 p = vertices[opposite];
+		b3Vec3 n1 = normals[edge->triangle1];
+		b3Vec3 n2 = normals[edge->triangle2];
+
+		// Quantize the angles between neighboring normals.
+		int indices1[3] = { i1, i2, i3 };
+		int indices2[3] = { j1, j2, j3 };
+		int k1 = edge->triangleEdgeIndex1;
+		int k2 = edge->triangleEdgeIndex2;
+		if ( indices1[k1] == indices2[( k2 + 1 ) % 3] )
+		{
+			b3Vec3 a = vertices[indices1[k1]];
+			b3Vec3 b = vertices[indices1[( k1 + 1 ) % 3]];
+			b3Vec3 edgeVector = b3Sub( b, a );
+			b3Vec3 outward = b3Cross( edgeVector, n1 );
+			B3_ASSERT( angleCount < angleCapacity );
+			angleYs[angleCount] = b3Dot( n2, outward );
+			angleXs[angleCount] = b3Dot( n2, n1 );
+			angleLengthSqs[angleCount] = b3Dot( edgeVector, edgeVector );
+			angleSlots[2 * angleCount + 0] = 3 * edge->triangle1 + k1;
+			angleSlots[2 * angleCount + 1] = 3 * edge->triangle2 + k2;
+			angleCount += 1;
+		}
+
+		float cos5Deg = 0.9962f;
+		float signedVolume = b3SignedVolume( v1, v2, v3, p );
+		float cosAngle = b3Dot( n1, n2 );
+		if ( signedVolume > 0.0f || cosAngle > cos5Deg )
+		{
+			int edgeFlags[3] = { b3_concaveEdge1, b3_concaveEdge2, b3_concaveEdge3 };
+			*flag1 |= edgeFlags[edge->triangleEdgeIndex1];
+			*flag2 |= edgeFlags[edge->triangleEdgeIndex2];
+		}
+
+		if ( signedVolume < 0.0f || cosAngle > cos5Deg )
+		{
+			int edgeFlags[3] = { b3_inverseConcaveEdge1, b3_inverseConcaveEdge2, b3_inverseConcaveEdge3 };
+			*flag1 |= edgeFlags[edge->triangleEdgeIndex1];
+			*flag2 |= edgeFlags[edge->triangleEdgeIndex2];
+		}
+	}
+
+	int paddedAngleCount = ( angleCount + 3 ) & ~3;
+	B3_ASSERT( paddedAngleCount <= angleCapacity );
+	for ( int i = angleCount; i < paddedAngleCount; ++i )
+	{
+		angleYs[i] = 0.0f;
+		angleXs[i] = 0.0f;
+		angleLengthSqs[i] = 0.0f;
+	}
+
+	for ( int i = 0; i < angleCount; i += 4 )
+	{
+		b3FloatW4 x = b3MulW4( b3LoadW4( angleXs + i ), b3SqrtW4( b3LoadW4( angleLengthSqs + i ) ) );
+		b3FloatW4 angle = b3Atan2W4( b3LoadW4( angleYs + i ), x );
+		b3StoreW4( angleYs + i, angle );
+	}
+
+	for ( int i = 0; i < angleCount; ++i )
+	{
+		int8_t quantized = b3QuantizeEdgeAngle( angleYs[i] );
+		edgeAngles[angleSlots[2 * i + 0]] = quantized;
+		edgeAngles[angleSlots[2 * i + 1]] = quantized;
+	}
+
+	B3_FREE( angleSlots, int, 2 * angleCapacity );
+	B3_FREE( angleLengthSqs, float, angleCapacity );
+	B3_FREE( angleXs, float, angleCapacity );
+	B3_FREE( angleYs, float, angleCapacity );
+
+	uint8_t* vertexFlags = b3GetMeshVertexFlagsWrite( mesh );
+	B3_ASSERT( vertexFlags != NULL );
+
+	for ( int i = 0; i < mesh->vertexCount; ++i )
+	{
+		vertexFlags[i] = b3_flatVertex;
+	}
+
+	// Vertex flags for ghost collision handling.
+	for ( int i = 0; i < triangleCount; ++i )
+	{
+		int indices[3] = { triangles[i].index1, triangles[i].index2, triangles[i].index3 };
+		for ( int k = 0; k < 3; ++k )
+		{
+			int8_t angle = edgeAngles[3 * i + k];
+			int a = indices[k];
+			int b = indices[k < 2 ? k + 1 : 0];
+
+			// Edge not flat?
+			if ( angle != 0 )
+			{
+				vertexFlags[a] = (uint8_t)( vertexFlags[a] & ~b3_flatVertex );
+				vertexFlags[b] = (uint8_t)( vertexFlags[b] & ~b3_flatVertex );
+			}
+
+			// Edge concave?
+			if ( angle < 0 && angle != B3_BOUNDARY_EDGE_ANGLE )
+			{
+				vertexFlags[a] |= b3_concaveVertex;
+				vertexFlags[b] |= b3_concaveVertex;
+			}
+		}
+	}
+
+	B3_FREE( edges, b3MeshEdge, edgeCount );
+}
+
+// Push the ring entry directions of a vertex to the encoder. Returns the cliff count.
+static int b3BuildVertexRing( const b3MeshData* mesh, const b3Vec3* normals, const int* fan, int fanCount, int vertex,
+							  int* stamps, b3RingEncoder* encoder )
+{
+	const b3MeshTriangle* triangles = b3GetMeshTriangles( mesh );
+	const b3Vec3* vertices = b3GetMeshVertices( mesh );
+	const int8_t* edgeAngles = b3GetMeshEdgeAngles( mesh );
+
+	for ( int i = 0; i < fanCount; ++i )
+	{
+		b3MeshTriangle triangle = triangles[fan[i]];
+		int indices[3] = { triangle.index1, triangle.index2, triangle.index3 };
+		int k = indices[0] == vertex ? 0 : ( indices[1] == vertex ? 1 : 2 );
+
+		// The other vertex indices on this triangle that are not the input vertex index.
+		int others[2] = { indices[k < 2 ? k + 1 : 0], indices[k > 0 ? k - 1 : 2] };
+
+		for ( int j = 0; j < 2; ++j )
+		{
+			int other = others[j];
+			if ( stamps[other] == vertex )
+			{
+				continue;
+			}
+
+			stamps[other] = vertex;
+
+			// This encodes every edge. The intersection of all planes perpendicular to the edge axis builds
+			// the Voronoi region. That process can identify edges that don't contribute to the Voronoi region.
+			// That culling could save storage but is skipped for simplicity.
+			b3PushRingEntry( encoder, b3Sub( vertices[other], vertices[vertex] ) );
+		}
+	}
+
+	int cliffCount = 0;
+	for ( int i = 0; i < fanCount; ++i )
+	{
+		int triangleIndex = fan[i];
+		b3MeshTriangle triangle = triangles[triangleIndex];
+		int indices[3] = { triangle.index1, triangle.index2, triangle.index3 };
+		int k = indices[0] == vertex ? 0 : ( indices[1] == vertex ? 1 : 2 );
+		int edgeIndices[2] = { k, k > 0 ? k - 1 : 2 };
+
+		for ( int j = 0; j < 2; ++j )
+		{
+			if ( edgeAngles[3 * triangleIndex + edgeIndices[j]] != B3_BOUNDARY_EDGE_ANGLE )
+			{
+				continue;
+			}
+
+			// The cliff is a 90 degree drop.
+			b3PushRingEntry( encoder, b3Neg( normals[triangleIndex] ) );
+			cliffCount += 1;
+		}
+	}
+
+	return cliffCount;
+}
+
+// Build a neighbor angle ring for each vertex. Used to mitigate ghost collisions with minimal tolerances
+// and fudge factors.
+static b3MeshData* b3AppendVertexRings( b3MeshData* mesh, const b3Vec3* normals )
+{
+	const b3MeshTriangle* triangles = b3GetMeshTriangles( mesh );
+	const uint8_t* vertexFlags = b3GetMeshVertexFlags( mesh );
+	B3_ASSERT( vertexFlags != NULL );
+
+	int vertexCount = mesh->vertexCount;
+	int triangleCount = mesh->triangleCount;
+
+	// Triangle fan counts per vertex via counting sort and prefix sum.
+	int* fanStarts = B3_ALLOC( int, ( vertexCount + 1 ) );
+
+	// Sub-arrays of triangle fans for each vertex.
+	int* fans = B3_ALLOC( int, ( 3 * triangleCount ) );
+
+	// Cursors for walking fan sub-arrays.
+	int* cursors = B3_ALLOC( int, vertexCount );
+
+	// Edge stamps to avoid visiting the same edge twice when
+	// iterating triangles.
+	int* stamps = B3_ALLOC( int, vertexCount );
+
+	// Byte offsets for each sub-array of ring entries per vertex.
+	int* ringStarts = B3_ALLOC( int, ( vertexCount + 1 ) );
+
+	// Counting sort
+	memset( fanStarts, 0, ( vertexCount + 1 ) * sizeof( int ) );
+	for ( int i = 0; i < triangleCount; ++i )
+	{
+		fanStarts[triangles[i].index1 + 1] += 1;
+		fanStarts[triangles[i].index2 + 1] += 1;
+		fanStarts[triangles[i].index3 + 1] += 1;
+	}
+
+	for ( int i = 0; i < vertexCount; ++i )
+	{
+		fanStarts[i + 1] += fanStarts[i];
+	}
+
+	memcpy( cursors, fanStarts, vertexCount * sizeof( int ) );
+	for ( int i = 0; i < triangleCount; ++i )
+	{
+		fans[cursors[triangles[i].index1]++] = i;
+		fans[cursors[triangles[i].index2]++] = i;
+		fans[cursors[triangles[i].index3]++] = i;
+	}
+
+	for ( int i = 0; i < vertexCount; ++i )
+	{
+		stamps[i] = B3_NULL_INDEX;
+	}
+
+	// Hey dude, I got an offset to the array of offsets.
+	size_t startsOffset = mesh->byteCount;
+
+	// After the array of offsets, the ring sub-arrays begin.
+	size_t ringOffset = startsOffset + b3AlignUp8( ( vertexCount + 1 ) * sizeof( int ) );
+
+	// Upper bound on entries: two edges per fan triangle and two cliffs per boundary edge.
+	const int8_t* edgeAngles = b3GetMeshEdgeAngles( mesh );
+	int entryBound = 0;
+	for ( int i = 0; i < vertexCount; ++i )
+	{
+		if ( ( vertexFlags[i] & b3_flatVertex ) == 0 )
+		{
+			entryBound += 2 * ( fanStarts[i + 1] - fanStarts[i] );
+		}
+	}
+
+	for ( int i = 0; i < 3 * triangleCount; ++i )
+	{
+		if ( edgeAngles[i] == B3_BOUNDARY_EDGE_ANGLE )
+		{
+			entryBound += 2;
+		}
+	}
+
+	b3RingEncoder encoder = { 0 };
+	encoder.capacity = ( entryBound + 3 ) & ~3;
+	encoder.x = B3_ALLOC( float, encoder.capacity );
+	encoder.y = B3_ALLOC( float, encoder.capacity );
+	encoder.z = B3_ALLOC( float, encoder.capacity );
+	encoder.entries = B3_ALLOC( b3VertexRingEntry, encoder.capacity );
+
+	int* entryStarts = B3_ALLOC( int, ( vertexCount + 1 ) );
+	int* cliffCounts = B3_ALLOC( int, vertexCount );
+
+	// The vertex ring offset for the current vertex.
+	size_t offset = ringOffset;
+
+	for ( int i = 0; i < vertexCount; ++i )
+	{
+		ringStarts[i] = (int)offset;
+		entryStarts[i] = encoder.count;
+		cliffCounts[i] = 0;
+		if ( vertexFlags[i] & b3_flatVertex )
+		{
+			// Flat vertices don't store ring data.
+			continue;
+		}
+
+		const int* fan = fans + fanStarts[i];
+		int fanCount = fanStarts[i + 1] - fanStarts[i];
+		cliffCounts[i] = b3BuildVertexRing( mesh, normals, fan, fanCount, i, stamps, &encoder );
+		int entryCount = encoder.count - entryStarts[i];
+		offset += sizeof( b3VertexRing ) + entryCount * sizeof( b3VertexRingEntry );
+	}
+
+	ringStarts[vertexCount] = (int)offset;
+	entryStarts[vertexCount] = encoder.count;
+
+	b3EncodeRingEntries( &encoder );
+
+	// We now have the required space, grow the blob.
+	size_t byteCount = ringOffset + b3AlignUp8( offset - ringOffset );
+	b3MeshData* result = b3Alloc( byteCount );
+	memset( result, 0, byteCount );
+	memcpy( result, mesh, mesh->byteCount );
+	b3Free( mesh, mesh->byteCount );
+
+	result->byteCount = (int)byteCount;
+	result->vertexRingOffset = (int)startsOffset;
+
+	// Copy the ring sub-array offsets per vertex. The vertexCount + 1 entry is the end offset.
+	memcpy( (uint8_t*)result + startsOffset, ringStarts, ( vertexCount + 1 ) * sizeof( int ) );
+
+	for ( int i = 0; i < vertexCount; ++i )
+	{
+		if ( ringStarts[i + 1] == ringStarts[i] )
+		{
+			continue;
+		}
+
+		b3VertexRing* ring = (b3VertexRing*)( (uint8_t*)result + ringStarts[i] );
+		B3_ASSERT( cliffCounts[i] <= UINT16_MAX );
+		ring->cliffCount = (uint16_t)cliffCounts[i];
+
+		int entryCount = entryStarts[i + 1] - entryStarts[i];
+		memcpy( ring + 1, encoder.entries + entryStarts[i], entryCount * sizeof( b3VertexRingEntry ) );
+	}
+
+	B3_FREE( cliffCounts, int, vertexCount );
+	B3_FREE( entryStarts, int, ( vertexCount + 1 ) );
+	B3_FREE( encoder.entries, b3VertexRingEntry, encoder.capacity );
+	B3_FREE( encoder.z, float, encoder.capacity );
+	B3_FREE( encoder.y, float, encoder.capacity );
+	B3_FREE( encoder.x, float, encoder.capacity );
+	B3_FREE( ringStarts, int, ( vertexCount + 1 ) );
+	B3_FREE( stamps, int, vertexCount );
+	B3_FREE( cursors, int, vertexCount );
+	B3_FREE( fans, int, ( 3 * triangleCount ) );
+	B3_FREE( fanStarts, int, ( vertexCount + 1 ) );
+
+	return result;
+}
+
+b3MeshData* b3CreateGridMesh( int xCount, int zCount, float cellWidth, int materialCount, bool identifyEdges )
+{
+	B3_ASSERT( 0 <= materialCount && materialCount <= UINT8_MAX );
+
+	// Create vertices
+	int vertexCount = ( xCount + 1 ) * ( zCount + 1 );
+
+	b3Array( b3Vec3 ) vertices = { 0 };
+	b3Array_Resize( vertices, vertexCount );
+	int index = 0;
+
+	float xWidth = cellWidth * xCount;
+	float zWidth = cellWidth * zCount;
+
+	float x = -0.5f * xWidth;
+	for ( int ix = 0; ix <= xCount; ++ix )
+	{
+		float z = -0.5f * zWidth;
+		for ( int iz = 0; iz <= zCount; ++iz )
+		{
+			vertices.data[index] = (b3Vec3){ x, 0.0f, z };
+			z += cellWidth;
+			index += 1;
+		}
+		x += cellWidth;
+	}
+	B3_ASSERT( index == vertexCount );
+
+	// Triangles
+	int triangleCount = 2 * xCount * zCount;
+
+	b3Array( int ) indices = { 0 };
+	b3Array_Resize( indices, 3 * triangleCount );
+
+	b3Array( uint8_t ) materialIndices = { 0 };
+	b3Array_Resize( materialIndices, triangleCount );
+
+	int materialIndex = 0;
+	index = 0;
+	for ( int ix = 0; ix < xCount; ++ix )
+	{
+		for ( int iz = 0; iz < zCount; ++iz )
+		{
+			int index1 = iz + ( zCount + 1 ) * ix;
+			int index2 = index1 + 1;
+			int index3 = index2 + ( zCount + 1 );
+			int index4 = index3 - 1;
+
+			B3_ASSERT( index1 < vertexCount );
+			B3_ASSERT( index2 < vertexCount );
+			B3_ASSERT( index3 < vertexCount );
+			B3_ASSERT( index4 < vertexCount );
+
+			indices.data[index + 0] = index1;
+			indices.data[index + 1] = index2;
+			indices.data[index + 2] = index3;
+
+			indices.data[index + 3] = index3;
+			indices.data[index + 4] = index4;
+			indices.data[index + 5] = index1;
+
+			if ( materialCount > 0 )
+			{
+				materialIndices.data[2 * materialIndex + 0] = (uint8_t)( materialIndex % materialCount );
+				materialIndices.data[2 * materialIndex + 1] = (uint8_t)( materialIndex % materialCount );
+			}
+
+			materialIndex += 1;
+			index += 6;
+		}
+	}
+	B3_ASSERT( index == 3 * triangleCount );
+
+	b3MeshDef def = { 0 };
+	def.vertexCount = vertices.count;
+	def.vertices = vertices.data;
+	def.triangleCount = indices.count / 3;
+	def.indices = indices.data;
+	def.materialIndices = materialCount > 0 ? materialIndices.data : NULL;
+	def.useMedianSplit = true;
+	def.identifyEdges = identifyEdges;
+
+	b3MeshData* meshData = b3CreateMesh( &def, NULL, 0 );
+
+	b3Array_Destroy( indices );
+	b3Array_Destroy( vertices );
+	b3Array_Destroy( materialIndices );
+
+	return meshData;
+}
+
+b3MeshData* b3CreateWaveMesh( int xCount, int zCount, float cellWidth, float amplitude, float rowFrequency,
+							  float columnFrequency )
+{
+	// Create vertices
+	int vertexCount = ( xCount + 1 ) * ( zCount + 1 );
+
+	b3Array( b3Vec3 ) vertices = { 0 };
+	b3Array_Resize( vertices, vertexCount );
+	int index = 0;
+
+	float xWidth = cellWidth * xCount;
+	float zWidth = cellWidth * zCount;
+
+	float omegaZ = 2.0f * B3_PI * rowFrequency * cellWidth;
+	float omegaX = 2.0f * B3_PI * columnFrequency * cellWidth;
+
+	float x = -0.5f * xWidth;
+	b3CosSin cs = { 0 };
+	for ( int ix = 0; ix <= xCount; ++ix )
+	{
+		cs = b3ComputeCosSin( omegaX * ix );
+		float rowHeight = cs.sine;
+
+		float z = -0.5f * zWidth;
+		for ( int iz = 0; iz <= zCount; ++iz )
+		{
+			cs = b3ComputeCosSin( omegaZ * iz );
+			float columnHeight = cs.sine;
+
+			float y = amplitude * rowHeight * columnHeight;
+			vertices.data[index] = (b3Vec3){ x, y, z };
+			z += cellWidth;
+			index += 1;
+		}
+		x += cellWidth;
+	}
+	B3_ASSERT( index == vertexCount );
+
+	// Triangles
+	int triangleCount = 2 * xCount * zCount;
+
+	b3Array( int ) indices = { 0 };
+	b3Array_Resize( indices, 3 * triangleCount );
+
+	index = 0;
+	for ( int ix = 0; ix < xCount; ++ix )
+	{
+		for ( int iz = 0; iz < zCount; ++iz )
+		{
+			int index1 = iz + ( zCount + 1 ) * ix;
+			int index2 = index1 + 1;
+			int index3 = index2 + ( zCount + 1 );
+			int index4 = index3 - 1;
+
+			B3_ASSERT( index1 < vertexCount );
+			B3_ASSERT( index2 < vertexCount );
+			B3_ASSERT( index3 < vertexCount );
+			B3_ASSERT( index4 < vertexCount );
+
+			indices.data[index + 0] = index1;
+			indices.data[index + 1] = index2;
+			indices.data[index + 2] = index3;
+
+			indices.data[index + 3] = index3;
+			indices.data[index + 4] = index4;
+			indices.data[index + 5] = index1;
+
+			index += 6;
+		}
+	}
+	B3_ASSERT( index == 3 * triangleCount );
+
+	b3MeshDef def = { 0 };
+	def.vertexCount = vertices.count;
+	def.vertices = vertices.data;
+	def.triangleCount = indices.count / 3;
+	def.indices = indices.data;
+	def.useMedianSplit = true;
+	def.identifyEdges = true;
+
+	b3MeshData* meshData = b3CreateMesh( &def, NULL, 0 );
+
+	b3Array_Destroy( indices );
+	b3Array_Destroy( vertices );
+
+	return meshData;
+}
+
+b3MeshData* b3CreateTorusMesh( int radialResolution, int tubularResolution, float radius, float thickness )
+{
+	// Create vertices
+	b3Array( b3Vec3 ) vertices = { 0 };
+
+	for ( int radialIndex = 0; radialIndex < radialResolution; radialIndex++ )
+	{
+		for ( int tubularIndex = 0; tubularIndex < tubularResolution; tubularIndex++ )
+		{
+			float u = (float)tubularIndex / tubularResolution * B3_TWO_PI;
+			float v = (float)radialIndex / radialResolution * B3_TWO_PI;
+
+			float x = ( radius + thickness * b3Cos( v ) ) * b3Cos( u );
+			float y = ( radius + thickness * b3Cos( v ) ) * b3Sin( u );
+			float z = thickness * b3Sin( v );
+
+			b3Vec3 vertex = { x, y, z };
+			b3Array_Push( vertices, vertex );
+		}
+	}
+
+	// Triangles
+	b3Array( int ) indices = { 0 };
+	for ( int radialIndex1 = 0; radialIndex1 < radialResolution; radialIndex1++ )
+	{
+		int radialIndex2 = ( radialIndex1 + 1 ) % radialResolution;
+		for ( int tubularIndex1 = 0; tubularIndex1 < tubularResolution; tubularIndex1++ )
+		{
+			int tubularIndex2 = ( tubularIndex1 + 1 ) % tubularResolution;
+			int index1 = radialIndex1 * tubularResolution + tubularIndex1;
+			int index2 = radialIndex1 * tubularResolution + tubularIndex2;
+			int index3 = radialIndex2 * tubularResolution + tubularIndex2;
+			int index4 = radialIndex2 * tubularResolution + tubularIndex1;
+
+			b3Array_Push( indices, index1 );
+			b3Array_Push( indices, index2 );
+			b3Array_Push( indices, index3 );
+
+			b3Array_Push( indices, index3 );
+			b3Array_Push( indices, index4 );
+			b3Array_Push( indices, index1 );
+		}
+	}
+
+	b3MeshDef def = { 0 };
+	def.vertexCount = vertices.count;
+	def.vertices = vertices.data;
+	def.triangleCount = indices.count / 3;
+	def.indices = indices.data;
+	def.useMedianSplit = false;
+	def.identifyEdges = true;
+
+	b3MeshData* meshData = b3CreateMesh( &def, NULL, 0 );
+
+	b3Array_Destroy( vertices );
+	b3Array_Destroy( indices );
+	return meshData;
+}
+
+b3MeshData* b3CreateBoxMesh( b3Vec3 center, b3Vec3 extent, bool identifyEdges )
+{
+	float x = extent.x;
+	float y = extent.y;
+	float z = extent.z;
+	b3Vec3 vertices[] = {
+		{ x, y, z },  { -x, y, z },	 { -x, -y, z },	 { x, -y, z },
+		{ x, y, -z }, { -x, y, -z }, { -x, -y, -z }, { x, -y, -z },
+	};
+
+	for ( int i = 0; i < 8; ++i )
+	{
+		vertices[i] = b3Add( vertices[i], center );
+	}
+
+	int indices[] = {
+		0, 1, 3, 1, 2, 3, // front
+		0, 4, 1, 1, 4, 5, // top
+		0, 3, 7, 4, 0, 7, // right
+		4, 7, 5, 6, 5, 7, // back
+		1, 5, 2, 6, 2, 5, // left
+		3, 2, 7, 6, 7, 2, // bottom
+	};
+
+	b3MeshDef def = { 0 };
+	def.vertexCount = 8;
+	def.vertices = vertices;
+	def.triangleCount = 12;
+	def.indices = indices;
+	def.useMedianSplit = false;
+	def.identifyEdges = identifyEdges;
+
+	return b3CreateMesh( &def, NULL, 0 );
+}
+
+b3MeshData* b3CreateHollowBoxMesh( b3Vec3 center, b3Vec3 extent )
+{
+	float x = extent.x;
+	float y = extent.y;
+	float z = extent.z;
+	b3Vec3 vertices[] = {
+		{ x, y, z },  { -x, y, z },	 { -x, -y, z },	 { x, -y, z },
+		{ x, y, -z }, { -x, y, -z }, { -x, -y, -z }, { x, -y, -z },
+	};
+
+	for ( int i = 0; i < 8; ++i )
+	{
+		vertices[i] = b3Add( vertices[i], center );
+	}
+
+	int indices[] = {
+		3, 1, 0, 3, 2, 1, // front
+		1, 4, 0, 5, 4, 1, // top
+		7, 3, 0, 7, 0, 4, // right
+		5, 7, 4, 7, 5, 6, // back
+		2, 5, 1, 5, 2, 6, // left
+		7, 2, 3, 2, 7, 6, // bottom
+	};
+
+	b3MeshDef def = { 0 };
+	def.vertexCount = 8;
+	def.vertices = vertices;
+	def.triangleCount = 12;
+	def.indices = indices;
+	def.useMedianSplit = false;
+	def.identifyEdges = true;
+
+	return b3CreateMesh( &def, NULL, 0 );
+}
+
+b3MeshData* b3CreatePlatformMesh( b3Vec3 center, float height, float topWidth, float bottomWidth )
+{
+	float hb = 0.5f * bottomWidth;
+	float ht = 0.5f * topWidth;
+	float hy = 0.5f * height;
+	b3Vec3 vertices[] = {
+		{ ht, hy, ht },	 { -ht, hy, ht },  { -hb, -hy, hb },  { hb, -hy, hb },
+		{ ht, hy, -ht }, { -ht, hy, -ht }, { -hb, -hy, -hb }, { hb, -hy, -hb },
+	};
+
+	for ( int i = 0; i < 8; ++i )
+	{
+		vertices[i] = b3Add( vertices[i], center );
+	}
+
+	int indices[] = {
+		0, 1, 3, 1, 2, 3, // front
+		0, 4, 1, 1, 4, 5, // top
+		0, 3, 7, 4, 0, 7, // right
+		4, 7, 5, 6, 5, 7, // back
+		1, 5, 2, 6, 2, 5, // left
+		3, 2, 7, 6, 7, 2, // bottom
+	};
+
+	b3MeshDef def = { 0 };
+	def.vertexCount = 8;
+	def.vertices = vertices;
+	def.triangleCount = 12;
+	def.indices = indices;
+	def.useMedianSplit = true;
+	def.identifyEdges = true;
+
+	return b3CreateMesh( &def, NULL, 0 );
+}
+
+static void b3CopyVerticesWithStride( b3Vec3* dst, const b3Vec3* src, int count, size_t stride )
+{
+	if ( stride == sizeof( b3Vec3 ) )
+	{
+		memcpy( dst, src, count * sizeof( b3Vec3 ) );
+		return;
+	}
+
+	for ( int i = 0; i < count; ++i )
+	{
+		dst[i] = *(const b3Vec3*)( (const uint8_t*)src + i * stride );
+	}
+}
+
+// Stride larger than this likely indicates stride is uninitialized memory.
+#define B3_MAX_STRIDE 4096
+
+// todo this should fail if the mesh has a height greater than B3_MESH_STACK_SIZE
+b3MeshData* b3CreateMesh( const b3MeshDef* def, int* degenerateTriangleIndices, int degenerateCapacity )
+{
+	if ( def->stride != 0 && ( def->stride < sizeof( b3Vec3 ) || B3_MAX_STRIDE < def->stride ) )
+	{
+		return NULL;
+	}
+
+	if ( ( def->stride & 3 ) != 0 )
+	{
+		return NULL;
+	}
+
+	if ( def->vertexCount < 3 || def->vertices == NULL || def->triangleCount <= 0 || def->indices == NULL )
+	{
+		return NULL;
+	}
+
+	int triangleCount = def->triangleCount;
+	if ( triangleCount == 0 )
+	{
+		return NULL;
+	}
+
+	int vertexCount = def->vertexCount;
+	size_t stride = def->stride == 0 ? sizeof( b3Vec3 ) : def->stride;
+
+	b3AABB meshBounds = B3_BOUNDS3_EMPTY;
+
+	// Clone indices and vertices to support welding
+	b3Array( int ) indices;
+	b3Array_CreateN( indices, 3 * triangleCount );
+
+	b3Array( b3Vec3 ) vertices;
+	b3Array_CreateN( vertices, vertexCount );
+
+	if ( def->weldVertices && def->weldTolerance > 0.0f )
+	{
+		b3Array_Resize( vertices, vertexCount );
+		b3Array_Resize( indices, 3 * triangleCount );
+
+		b3WeldData data = {
+			.srcVertices = def->vertices,
+			.srcIndices = def->indices,
+			.dstVertices = vertices.data,
+			.dstIndices = indices.data,
+			.vertexCount = vertexCount,
+			.indexCount = 3 * triangleCount,
+			.stride = stride,
+		};
+
+		vertices.count = b3WeldVertices( &data, def->weldTolerance );
+		vertexCount = vertices.count;
+		B3_ASSERT( vertexCount <= def->vertexCount );
+	}
+	else
+	{
+		vertices.count = vertexCount;
+		b3CopyVerticesWithStride( vertices.data, def->vertices, vertexCount, stride );
+		b3Array_Append( indices, def->indices, 3 * triangleCount );
+	}
+
+	b3Array( b3Primitive ) primitives;
+	b3Array_CreateN( primitives, triangleCount );
+	int degenerateCount = 0;
+	float minArea = 0.01f * B3_LINEAR_SLOP * B3_LINEAR_SLOP;
+	float surfaceArea = 0.0f;
+	int materialCount = 1;
+	bool clockWise = def->clockWiseWinding;
+
+	for ( int index = 0; index < triangleCount; ++index )
+	{
+		int index1 = indices.data[3 * index + 0];
+		int index2 = indices.data[3 * index + 1];
+		int index3 = indices.data[3 * index + 2];
+
+		B3_ASSERT( 0 <= index1 && index1 < vertexCount );
+		B3_ASSERT( 0 <= index2 && index2 < vertexCount );
+		B3_ASSERT( 0 <= index3 && index3 < vertexCount );
+
+		b3Vec3 vertex1 = vertices.data[index1];
+		b3Vec3 vertex2 = vertices.data[index2];
+		b3Vec3 vertex3 = vertices.data[index3];
+
+		b3Vec3 normal = b3Cross( b3Sub( vertex2, vertex1 ), b3Sub( vertex3, vertex1 ) );
+		float area = 0.5f * b3Length( normal );
+
+		if ( area < minArea )
+		{
+			// b3Log( "degenerate: %d %d %d\n", index1, index2, index3 );
+
+			if ( index1 != index2 && index1 != index3 && index2 != index3 )
+			{
+				if ( degenerateTriangleIndices != NULL && degenerateCount < degenerateCapacity )
+				{
+					degenerateTriangleIndices[degenerateCount] = index;
+				}
+
+				degenerateCount += 1;
+			}
+
+			continue;
+		}
+
+		surfaceArea += area;
+
+		b3AABB box = {
+			.lowerBound = b3Min( vertex1, b3Min( vertex2, vertex3 ) ),
+			.upperBound = b3Max( vertex1, b3Max( vertex2, vertex3 ) ),
+		};
+
+		b3Vec3 center = b3AABB_Center( box );
+
+		b3Primitive primitive = {
+			.aabb = box,
+			.center = center,
+			.triangleIndex = index,
+		};
+		b3Array_Push( primitives, primitive );
+
+		if ( def->materialIndices != NULL )
+		{
+			materialCount = b3MaxInt( materialCount, def->materialIndices[index] + 1 );
+		}
+
+		meshBounds = b3AABB_Union( meshBounds, box );
+	}
+
+	// Update triangle count due to degenerates being skipped
+	triangleCount = primitives.count;
+
+	if ( b3IsSaneAABB( meshBounds ) == false )
+	{
+		b3Array_Destroy( primitives );
+		b3Array_Destroy( indices );
+		b3Array_Destroy( vertices );
+		return NULL;
+	}
+
+	// Build the tree (this reorders the builder triangles)
+	b3Array( b3MeshNode ) tempNodes;
+	b3Array_CreateN( tempNodes, 2 * triangleCount - 1 );
+
+	int treeHeight = 0;
+	b3BuildRecursive( &tempNodes, triangleCount, primitives.data, primitives.data, def->useMedianSplit, &treeHeight );
+
+	// Allocate the mesh
+	size_t byteCount = b3AlignUp8( sizeof( b3MeshData ) );
+	int nodeOffset = (int)byteCount;
+	byteCount += b3AlignUp8( tempNodes.count * sizeof( b3MeshNode ) );
+	int vertexOffset = (int)byteCount;
+	byteCount += b3AlignUp8( vertexCount * sizeof( b3Vec3 ) );
+	int triangleOffset = (int)byteCount;
+	byteCount += b3AlignUp8( triangleCount * sizeof( b3MeshTriangle ) );
+	int materialIndicesOffset = (int)byteCount;
+	byteCount += b3AlignUp8( triangleCount * sizeof( uint8_t ) );
+	int flagsOffset = (int)byteCount;
+	byteCount += b3AlignUp8( triangleCount * sizeof( uint8_t ) );
+	int edgeAngleOffset = 0;
+	int vertexFlagOffset = 0;
+	if ( def->identifyEdges )
+	{
+		edgeAngleOffset = (int)byteCount;
+		byteCount += b3AlignUp8( 3 * triangleCount * sizeof( int8_t ) );
+		vertexFlagOffset = (int)byteCount;
+		byteCount += b3AlignUp8( vertexCount * sizeof( uint8_t ) );
+	}
+
+	b3MeshData* mesh = b3Alloc( byteCount );
+
+	// zero initialize for determinism
+	memset( mesh, 0, byteCount );
+
+	mesh->version = B3_MESH_VERSION;
+	mesh->byteCount = (int)byteCount;
+	mesh->bounds = meshBounds;
+	mesh->surfaceArea = surfaceArea;
+	mesh->nodeCount = tempNodes.count;
+	mesh->treeHeight = treeHeight;
+	mesh->vertexCount = vertexCount;
+	mesh->triangleCount = triangleCount;
+	mesh->degenerateCount = degenerateCount;
+	mesh->nodeOffset = nodeOffset;
+	mesh->vertexOffset = vertexOffset;
+	mesh->triangleOffset = triangleOffset;
+	mesh->materialOffset = materialIndicesOffset;
+	mesh->materialCount = materialCount;
+	mesh->flagsOffset = flagsOffset;
+	mesh->edgeAngleOffset = edgeAngleOffset;
+	mesh->vertexFlagOffset = vertexFlagOffset;
+
+	b3MeshNode* nodes = b3GetMeshNodesWrite( mesh );
+	b3MeshTriangle* triangles = b3GetMeshTrianglesWrite( mesh );
+	b3Vec3* meshVertices = b3GetMeshVerticesWrite( mesh );
+	uint8_t* materialIndices = b3GetMeshMaterialIndicesWrite( mesh );
+	uint8_t* flags = b3GetMeshFlagsWrite( mesh );
+
+	memcpy( nodes, tempNodes.data, tempNodes.count * sizeof( b3MeshNode ) );
+	memcpy( meshVertices, vertices.data, vertexCount * sizeof( b3Vec3 ) );
+
+	for ( int index = 0; index < triangleCount; ++index )
+	{
+		b3Primitive primitive = primitives.data[index];
+
+		int i1 = 3 * primitive.triangleIndex + 0;
+		int i2 = 3 * primitive.triangleIndex + 1;
+		int i3 = 3 * primitive.triangleIndex + 2;
+		if ( clockWise )
+		{
+			B3_SWAP( i2, i3 );
+		}
+
+		triangles[index].index1 = indices.data[i1];
+		triangles[index].index2 = indices.data[i2];
+		triangles[index].index3 = indices.data[i3];
+		flags[index] = 0;
+
+		// Copy material indices if they exist. Otherwise the material indices are all zeroes.
+		if ( def->materialIndices != NULL )
+		{
+			uint8_t materialIndex = def->materialIndices[primitive.triangleIndex];
+			materialIndices[index] = materialIndex;
+		}
+	}
+
+	// Sort triangle in DFS order. Casts and volume queries will return sorted arrays.
+	// This also sorts material indices, but not the materials.
+	// This can fail if the BVH height is too large.
+	bool success = b3SortMeshTriangles( mesh );
+	if ( success == false )
+	{
+		b3Array_Destroy( tempNodes );
+		b3Array_Destroy( primitives );
+		b3Array_Destroy( indices );
+		b3Array_Destroy( vertices );
+		b3Free( mesh, byteCount );
+		return NULL;
+	}
+
+	if ( def->identifyEdges )
+	{
+		int meshTriangleCount = mesh->triangleCount;
+		b3Vec3* normals = B3_ALLOC( b3Vec3, meshTriangleCount );
+
+		b3IdentifyEdges( mesh, normals );
+
+		mesh = b3AppendVertexRings( mesh, normals );
+
+		B3_FREE( normals, b3Vec3, meshTriangleCount );
+	}
+
+	B3_VALIDATE( b3IsNonDegenerate( mesh, minArea ) );
+	B3_VALIDATE( b3IsConsistent( mesh ) );
+
+	b3Array_Destroy( tempNodes );
+	b3Array_Destroy( primitives );
+	b3Array_Destroy( indices );
+	b3Array_Destroy( vertices );
+
+	mesh->hash = 0;
+	mesh->hash = b3Hash64NonZero( (uint8_t*)mesh, mesh->byteCount );
+
+	return mesh;
+}
+
+void b3DestroyMesh( b3MeshData* mesh )
+{
+	b3Free( mesh, mesh->byteCount );
+}
+
+bool b3OverlapMesh( const b3Mesh* shape, b3Transform shapeTransform, const b3ShapeProxy* proxy )
+{
+	B3_ASSERT( proxy->count > 0 );
+	b3SimplexCache cache = { 0 };
+
+	b3Vec3 buffer[B3_MAX_SHAPE_CAST_POINTS];
+	b3ShapeProxy localProxy = b3MakeLocalProxy( proxy, shapeTransform, buffer );
+	b3AABB aabb = b3ComputeProxyAABB( &localProxy );
+
+	b3Vec3 meshScale = shape->scale;
+
+	// Scale may have reflection so min/max may become invalid when unscaled
+	b3V32 scale = b3LoadV( &meshScale.x );
+	b3V32 invScale = b3DivV( b3_oneV, scale );
+	b3V32 temp1 = b3MulV( invScale, b3LoadV( &aabb.lowerBound.x ) );
+	b3V32 temp2 = b3MulV( invScale, b3LoadV( &aabb.upperBound.x ) );
+	b3V32 invScaledBoundsMin = b3MinV( temp1, temp2 );
+	b3V32 invScaledBoundsMax = b3MaxV( temp1, temp2 );
+	b3V32 invScaledBoundsCenter = b3MulV( b3_halfV, b3AddV( invScaledBoundsMin, invScaledBoundsMax ) );
+	b3V32 invScaledBoundsExtent = b3SubV( invScaledBoundsMax, invScaledBoundsCenter );
+
+	b3DistanceInput input;
+	input.proxyB = localProxy;
+	input.transform = b3Transform_identity;
+	input.useRadii = true;
+
+	int count = 0;
+	const b3MeshNode* stack[B3_MESH_STACK_SIZE];
+	const b3MeshNode* node = b3GetRoot( shape->data );
+	const b3MeshTriangle* triangles = b3GetMeshTriangles( shape->data );
+	const b3Vec3* vertices = b3GetMeshVertices( shape->data );
+
+	while ( true )
+	{
+		// Test node overlap in unscaled space
+		b3V32 nodeMin = b3LoadV( &node->lowerBound.x );
+		b3V32 nodeMax = b3LoadV( &node->upperBound.x );
+		if ( b3TestBoundsOverlap( nodeMin, nodeMax, invScaledBoundsMin, invScaledBoundsMax ) )
+		{
+			if ( b3IsLeaf( node ) )
+			{
+				int triangleCount = node->data.asLeaf.triangleCount;
+				int triangleOffset = node->triangleOffset;
+
+				for ( int index = 0; index < triangleCount; ++index )
+				{
+					int triangleIndex = triangleOffset + index;
+					b3MeshTriangle triangle = triangles[triangleIndex];
+
+					b3Vec3 vertex1 = vertices[triangle.index1];
+					b3Vec3 vertex2 = vertices[triangle.index2];
+					b3Vec3 vertex3 = vertices[triangle.index3];
+					b3V32 v1 = b3LoadV( &vertex1.x );
+					b3V32 v2 = b3LoadV( &vertex2.x );
+					b3V32 v3 = b3LoadV( &vertex3.x );
+
+					// Bounding box overlap test in unscaled space
+					if ( b3TestBoundsTriangleOverlap( invScaledBoundsCenter, invScaledBoundsExtent, v1, v2, v3 ) )
+					{
+						// Shape-triangle overlap test in scaled space. Winding order doesn't matter.
+						b3Vec3 triangleVertices[] = { b3Mul( meshScale, vertex1 ), b3Mul( meshScale, vertex2 ),
+													  b3Mul( meshScale, vertex3 ) };
+						input.proxyA = (b3ShapeProxy){ triangleVertices, 3, 0.0f };
+
+						// reset the cache
+						cache.count = 0;
+
+						// get distance between triangle and query shape
+						b3DistanceOutput output = b3ShapeDistance( &input, &cache, NULL, 0 );
+
+						float tolerance = 0.1f * B3_LINEAR_SLOP;
+						if ( output.distance < tolerance )
+						{
+							// overlap detected
+							return true;
+						}
+					}
+				}
+			}
+			else
+			{
+				// Recurse
+				B3_ASSERT( count <= B3_MESH_STACK_SIZE - 1 );
+				stack[count++] = b3GetRightChild( node );
+				node = b3GetLeftChild( node );
+
+				continue;
+			}
+		}
+
+		if ( count == 0 )
+		{
+			break;
+		}
+		node = stack[--count];
+	}
+
+	return false;
+}
+
+b3AABB b3ComputeMeshAABB( const b3MeshData* shape, b3Transform transform, b3Vec3 scale )
+{
+	b3Vec3 scaledLower = b3Mul( scale, shape->bounds.lowerBound );
+	b3Vec3 scaledUpper = b3Mul( scale, shape->bounds.upperBound );
+	b3AABB bounds = { b3Min( scaledLower, scaledUpper ), b3Max( scaledLower, scaledUpper ) };
+	return b3AABB_Transform( transform, bounds );
+}
+
+b3CastOutput b3RayCastMesh( const b3Mesh* mesh, const b3RayCastInput* input )
+{
+	const b3MeshData* data = mesh->data;
+	b3Vec3 meshScale = mesh->scale;
+
+	b3CastOutput bestOutput = { 0 };
+	bestOutput.fraction = input->maxFraction;
+	bestOutput.triangleIndex = B3_NULL_INDEX;
+
+	b3V32 lambda = b3SplatV( input->maxFraction );
+
+	b3V32 rayStart = b3LoadV( &input->origin.x );
+	b3V32 rayDelta = b3LoadV( &input->translation.x );
+
+	b3V32 scale = b3LoadV( &meshScale.x );
+	b3V32 invScale = b3DivV( b3_oneV, scale );
+	bool ccw = meshScale.x * meshScale.y * meshScale.z > 0.0f;
+
+	// Use the inverse scaled ray for traversal of the BVH
+	b3V32 invScaledRayStart = b3MulV( invScale, rayStart );
+	b3V32 invScaledRayDelta = b3MulV( invScale, rayDelta );
+	b3V32 invScaledRayEnd = b3AddV( invScaledRayStart, b3MulV( lambda, invScaledRayDelta ) );
+	b3V32 invScaledRayMin = b3MinV( invScaledRayStart, invScaledRayEnd );
+	b3V32 invScaledRayMax = b3MaxV( invScaledRayStart, invScaledRayEnd );
+
+	int count = 0;
+	const b3MeshNode* stack[B3_MESH_STACK_SIZE];
+	const b3MeshNode* node = b3GetRoot( data );
+	const b3MeshTriangle* triangles = b3GetMeshTriangles( data );
+	const b3Vec3* vertices = b3GetMeshVertices( data );
+	const uint8_t* materialIndices = b3GetMeshMaterialIndices( data );
+
+	while ( true )
+	{
+		// Test node/ray overlap using SAT
+		b3V32 nodeMin = b3LoadV( &node->lowerBound.x );
+		b3V32 nodeMax = b3LoadV( &node->upperBound.x );
+		if ( b3TestBoundsOverlap( nodeMin, nodeMax, invScaledRayMin, invScaledRayMax ) &&
+			 b3TestBoundsRayOverlap( nodeMin, nodeMax, invScaledRayStart, invScaledRayDelta ) )
+		{
+			// SAT: The node and ray overlap - process leaf node or recurse
+			if ( b3IsLeaf( node ) )
+			{
+				int triangleCount = node->data.asLeaf.triangleCount;
+				int triangleOffset = node->triangleOffset;
+
+				for ( int index = 0; index < triangleCount; ++index )
+				{
+					int triangleIndex = triangleOffset + index;
+					b3MeshTriangle triangle = triangles[triangleIndex];
+
+					// Collide ray with triangle in scaled space
+					b3Vec3 vertex1 = b3Mul( meshScale, vertices[triangle.index1] );
+					b3Vec3 vertex2, vertex3;
+
+					// The CPU should predict this branch
+					if ( ccw )
+					{
+						vertex2 = b3Mul( meshScale, vertices[triangle.index2] );
+						vertex3 = b3Mul( meshScale, vertices[triangle.index3] );
+					}
+					else
+					{
+						vertex2 = b3Mul( meshScale, vertices[triangle.index3] );
+						vertex3 = b3Mul( meshScale, vertices[triangle.index2] );
+					}
+
+					// Collide ray with triangle in scaled space
+					b3V32 v1 = b3LoadV( &vertex1.x );
+					b3V32 v2 = b3LoadV( &vertex2.x );
+					b3V32 v3 = b3LoadV( &vertex3.x );
+
+					float alpha = b3IntersectRayTriangle( rayStart, rayDelta, v1, v2, v3 );
+					B3_ASSERT( 0 <= alpha && alpha <= 1.0f );
+
+					if ( alpha < bestOutput.fraction )
+					{
+						b3Vec3 edge1 = b3Sub( vertex2, vertex1 );
+						b3Vec3 edge2 = b3Sub( vertex3, vertex1 );
+						bestOutput.normal = b3Normalize( b3Cross( edge1, edge2 ) );
+						bestOutput.point = b3Add( input->origin, b3MulSV( alpha, input->translation ) );
+						bestOutput.fraction = alpha;
+						bestOutput.triangleIndex = triangleIndex;
+						bestOutput.materialIndex = materialIndices[triangleIndex];
+						bestOutput.hit = true;
+
+						// Update ray bounds in unscaled space
+						lambda = b3SplatV( alpha );
+						invScaledRayEnd = b3AddV( invScaledRayStart, b3MulV( lambda, invScaledRayDelta ) );
+						invScaledRayMin = b3MinV( invScaledRayStart, invScaledRayEnd );
+						invScaledRayMax = b3MaxV( invScaledRayStart, invScaledRayEnd );
+					}
+				}
+			}
+			else
+			{
+				// Determine traversal order (front -> back) and recurse
+				int axis = node->data.asNode.axis;
+				if ( b3GetV( invScaledRayDelta, axis ) > 0.0f )
+				{
+					B3_ASSERT( count <= B3_MESH_STACK_SIZE - 1 );
+					stack[count++] = b3GetRightChild( node );
+					node = b3GetLeftChild( node );
+				}
+				else
+				{
+					B3_ASSERT( count <= B3_MESH_STACK_SIZE - 1 );
+					stack[count++] = b3GetLeftChild( node );
+					node = b3GetRightChild( node );
+				}
+
+				continue;
+			}
+		}
+
+		if ( count == 0 )
+		{
+			break;
+		}
+		node = stack[--count];
+	}
+
+	return bestOutput;
+}
+
+b3CastOutput b3ShapeCastMesh( const b3Mesh* mesh, const b3ShapeCastInput* input )
+{
+	const b3MeshData* data = mesh->data;
+	b3Vec3 meshScale = mesh->scale;
+
+	b3CastOutput bestOutput = { 0 };
+	bestOutput.fraction = input->maxFraction;
+	bestOutput.triangleIndex = B3_NULL_INDEX;
+
+	b3V32 lambda = b3SplatV( input->maxFraction );
+
+	b3AABB shapeBounds = b3MakeAABB( input->proxy.points, input->proxy.count, input->proxy.radius );
+	b3Vec3 center = b3AABB_Center( shapeBounds );
+	b3Vec3 extents = b3AABB_Extents( shapeBounds );
+	b3V32 shapeExtent = b3LoadV( &extents.x );
+
+	b3V32 rayStart = b3LoadV( &center.x );
+	b3V32 rayDelta = b3LoadV( &input->translation.x );
+	b3V32 rayEnd = b3AddV( rayStart, b3MulV( lambda, rayDelta ) );
+	b3V32 rayMin = b3MinV( rayStart, rayEnd );
+	b3V32 rayMax = b3MaxV( rayStart, rayEnd );
+
+	b3V32 scale = b3LoadV( &meshScale.x );
+	b3V32 invScale = b3DivV( b3_oneV, scale );
+	b3V32 absInvScale = b3AbsV( invScale );
+	bool ccw = meshScale.x * meshScale.y * meshScale.z > 0.0f;
+
+	// Use the inverse scaled shape cast for traversal of the BVH
+	b3V32 invScaledRayStart = b3MulV( invScale, rayStart );
+	b3V32 invScaledRayDelta = b3MulV( invScale, rayDelta );
+	b3V32 invScaledRayEnd = b3AddV( invScaledRayStart, b3MulV( lambda, invScaledRayDelta ) );
+	b3V32 invScaledRayMin = b3MinV( invScaledRayStart, invScaledRayEnd );
+	b3V32 invScaledRayMax = b3MaxV( invScaledRayStart, invScaledRayEnd );
+	b3V32 invScaledShapeExtent = b3MulV( absInvScale, shapeExtent );
+
+	int count = 0;
+	const b3MeshNode* stack[B3_MESH_STACK_SIZE];
+	const b3MeshNode* node = b3GetRoot( data );
+	const b3MeshTriangle* triangles = b3GetMeshTriangles( data );
+	const b3Vec3* vertices = b3GetMeshVertices( data );
+	const uint8_t* materialIndices = b3GetMeshMaterialIndices( data );
+
+	while ( true )
+	{
+		// Test node/ray overlap using SAT in unscaled space
+		b3V32 nodeMin = b3SubV( b3LoadV( &node->lowerBound.x ), invScaledShapeExtent );
+		b3V32 nodeMax = b3AddV( b3LoadV( &node->upperBound.x ), invScaledShapeExtent );
+
+		if ( b3TestBoundsOverlap( nodeMin, nodeMax, invScaledRayMin, invScaledRayMax ) &&
+			 b3TestBoundsRayOverlap( nodeMin, nodeMax, invScaledRayStart, invScaledRayDelta ) )
+		{
+			// SAT: The node and ray overlap - process leaf node or recurse
+			if ( b3IsLeaf( node ) )
+			{
+				int triangleCount = node->data.asLeaf.triangleCount;
+				int triangleOffset = node->triangleOffset;
+
+				for ( int index = 0; index < triangleCount; ++index )
+				{
+					int triangleIndex = triangleOffset + index;
+					b3MeshTriangle triangle = triangles[triangleIndex];
+
+					// Collide shape with triangle in scaled space
+					b3Vec3 vertex1 = b3Mul( meshScale, vertices[triangle.index1] );
+					b3Vec3 vertex2, vertex3;
+
+					// The CPU should predict this branch
+					if ( ccw )
+					{
+						vertex2 = b3Mul( meshScale, vertices[triangle.index2] );
+						vertex3 = b3Mul( meshScale, vertices[triangle.index3] );
+					}
+					else
+					{
+						vertex2 = b3Mul( meshScale, vertices[triangle.index3] );
+						vertex3 = b3Mul( meshScale, vertices[triangle.index2] );
+					}
+
+					b3V32 v1 = b3LoadV( &vertex1.x );
+					b3V32 v2 = b3LoadV( &vertex2.x );
+					b3V32 v3 = b3LoadV( &vertex3.x );
+
+					b3V32 triangleMin = b3SubV( b3MinV( v1, b3MinV( v2, v3 ) ), shapeExtent );
+					b3V32 triangleMax = b3AddV( b3MaxV( v1, b3MaxV( v2, v3 ) ), shapeExtent );
+
+					// Test extended triangle vs ray bounds overlap in scaled space. Skip edge tests.
+					bool overlap = b3TestBoundsOverlap( triangleMin, triangleMax, rayMin, rayMax );
+					if ( overlap == false )
+					{
+						continue;
+					}
+
+					// This test is in scaled space. vertices and center are scaled.
+					float signedVolume = b3SignedVolume( vertex1, vertex2, vertex3, center );
+					if ( signedVolume < 0.0f )
+					{
+						// Backside
+						continue;
+					}
+
+					// Collide shape with triangle in scaled space.
+					b3Vec3 origin = vertex1;
+					b3Vec3 triangleVertices[] = { b3Vec3_zero, b3Sub( vertex2, origin ), b3Sub( vertex3, origin ) };
+					b3Transform shiftedOrigin = { b3Neg( origin ), b3Quat_identity };
+
+					b3ShapeCastPairInput pairInput;
+					pairInput.proxyA = (b3ShapeProxy){ triangleVertices, 3, 0.0f };
+					pairInput.proxyB = input->proxy;
+					pairInput.transform = shiftedOrigin;
+					pairInput.maxFraction = bestOutput.fraction;
+					pairInput.translationB = input->translation;
+					pairInput.canEncroach = input->canEncroach;
+
+					b3CastOutput pairOutput = b3ShapeCast( &pairInput );
+
+					if ( pairOutput.hit )
+					{
+						pairOutput.point = b3Add( pairOutput.point, origin );
+
+						bestOutput = pairOutput;
+						bestOutput.triangleIndex = triangleIndex;
+						bestOutput.materialIndex = materialIndices[triangleIndex];
+
+						// Update ray bounds in scaled space
+						lambda = b3SplatV( pairOutput.fraction );
+						rayEnd = b3AddV( rayStart, b3MulV( lambda, rayDelta ) );
+						rayMin = b3MinV( rayStart, rayEnd );
+						rayMax = b3MaxV( rayStart, rayEnd );
+
+						// Ray bounds in unscaled space
+						invScaledRayEnd = b3AddV( invScaledRayStart, b3MulV( lambda, invScaledRayDelta ) );
+						invScaledRayMin = b3MinV( invScaledRayStart, invScaledRayEnd );
+						invScaledRayMax = b3MaxV( invScaledRayStart, invScaledRayEnd );
+					}
+				}
+			}
+			else
+			{
+				// Determine traversal order (front -> back) and recurse
+				int axis = node->data.asNode.axis;
+				if ( b3GetV( invScaledRayDelta, axis ) > 0.0f )
+				{
+					B3_ASSERT( count <= B3_MESH_STACK_SIZE - 1 );
+					stack[count++] = b3GetRightChild( node );
+					node = b3GetLeftChild( node );
+				}
+				else
+				{
+					B3_ASSERT( count <= B3_MESH_STACK_SIZE - 1 );
+					stack[count++] = b3GetLeftChild( node );
+					node = b3GetRightChild( node );
+				}
+
+				continue;
+			}
+		}
+
+		if ( count == 0 )
+		{
+			break;
+		}
+		node = stack[--count];
+	}
+
+	return bestOutput;
+}
+
+int b3CollideMoverAndMesh( b3PlaneResult* planes, int capacity, const b3Mesh* shape, const b3Capsule* mover )
+{
+	if ( capacity == 0 )
+	{
+		return 0;
+	}
+
+	b3DistanceInput distanceInput = { 0 };
+	distanceInput.proxyB = (b3ShapeProxy){ &mover->center1, 2, 0.0f };
+	distanceInput.transform = b3Transform_identity;
+	distanceInput.useRadii = false;
+
+	b3SimplexCache cache = { 0 };
+	float radius = mover->radius;
+	b3Vec3 center = b3Lerp( mover->center1, mover->center2, 0.5f );
+	b3V32 center1 = b3LoadV( &mover->center1.x );
+	b3V32 center2 = b3LoadV( &mover->center2.x );
+	b3V32 r = b3SplatV( radius );
+	b3V32 boundsMin = b3SubV( b3MinV( center1, center2 ), r );
+	b3V32 boundsMax = b3AddV( b3MaxV( center1, center2 ), r );
+
+	// Scale may have reflection so min/max may become invalid when unscaled
+	b3Vec3 meshScale = shape->scale;
+	bool ccw = meshScale.x * meshScale.y * meshScale.z > 0.0f;
+	b3V32 scale = b3LoadV( &meshScale.x );
+	b3V32 invScale = b3DivV( b3_oneV, scale );
+	b3V32 temp1 = b3MulV( invScale, boundsMin );
+	b3V32 temp2 = b3MulV( invScale, boundsMax );
+	b3V32 invScaledBoundsMin = b3MinV( temp1, temp2 );
+	b3V32 invScaledBoundsMax = b3MaxV( temp1, temp2 );
+	b3V32 invScaledBoundsCenter = b3MulV( b3_halfV, b3AddV( invScaledBoundsMin, invScaledBoundsMax ) );
+	b3V32 invScaledBoundsExtent = b3SubV( invScaledBoundsMax, invScaledBoundsCenter );
+
+	int count = 0;
+	const b3MeshNode* stack[B3_MESH_STACK_SIZE];
+	const b3MeshNode* node = b3GetRoot( shape->data );
+	const b3MeshTriangle* triangles = b3GetMeshTriangles( shape->data );
+	const b3Vec3* vertices = b3GetMeshVertices( shape->data );
+	const uint8_t* materialIndices = b3GetMeshMaterialIndices( shape->data );
+
+	int planeCount = 0;
+	while ( planeCount < capacity )
+	{
+		// Test node overlap in unscaled space
+		b3V32 nodeMin = b3LoadV( &node->lowerBound.x );
+		b3V32 nodeMax = b3LoadV( &node->upperBound.x );
+		if ( b3TestBoundsOverlap( nodeMin, nodeMax, invScaledBoundsMin, invScaledBoundsMax ) )
+		{
+			if ( b3IsLeaf( node ) )
+			{
+				int triangleCount = node->data.asLeaf.triangleCount;
+				int triangleOffset = node->triangleOffset;
+
+				for ( int index = 0; index < triangleCount; ++index )
+				{
+					int triangleIndex = triangleOffset + index;
+					b3MeshTriangle triangle = triangles[triangleIndex];
+
+					b3Vec3 vertex1 = vertices[triangle.index1];
+					b3Vec3 vertex2 = vertices[triangle.index2];
+					b3Vec3 vertex3 = vertices[triangle.index3];
+
+					if ( ccw == false )
+					{
+						B3_SWAP( vertex2, vertex3 );
+					}
+
+					b3V32 v1 = b3LoadV( &vertex1.x );
+					b3V32 v2 = b3LoadV( &vertex2.x );
+					b3V32 v3 = b3LoadV( &vertex3.x );
+
+					// Test triangle bounds overlap in unscaled space
+					if ( b3TestBoundsTriangleOverlap( invScaledBoundsCenter, invScaledBoundsExtent, v1, v2, v3 ) )
+					{
+						// Compute shape distance in scaled space.
+						b3Vec3 triangleVertices[] = { b3Mul( meshScale, vertex1 ), b3Mul( meshScale, vertex2 ),
+													  b3Mul( meshScale, vertex3 ) };
+
+						// Vertices and center are in scaled space.
+						float signedVolume =
+							b3SignedVolume( triangleVertices[0], triangleVertices[1], triangleVertices[2], center );
+						if ( signedVolume < 0.0f )
+						{
+							// Backside
+							continue;
+						}
+
+						distanceInput.proxyA = (b3ShapeProxy){ triangleVertices, 3, 0.0f };
+
+						// reset the cache
+						cache.count = 0;
+
+						// get distance between triangle and query shape
+						b3DistanceOutput distanceOutput = b3ShapeDistance( &distanceInput, &cache, NULL, 0 );
+
+						if ( distanceOutput.distance == 0.0f )
+						{
+							// deep overlap
+						}
+						else if ( distanceOutput.distance <= mover->radius )
+						{
+							b3Plane plane = { distanceOutput.normal, mover->radius - distanceOutput.distance };
+							planes[planeCount] = (b3PlaneResult){ plane, distanceOutput.pointA, triangleIndex, 0,
+																  materialIndices[triangleIndex] };
+							planeCount += 1;
+
+							if ( planeCount == capacity )
+							{
+								return planeCount;
+							}
+						}
+					}
+				}
+			}
+			else
+			{
+				// Recurse
+				B3_ASSERT( count <= B3_MESH_STACK_SIZE - 1 );
+				stack[count++] = b3GetRightChild( node );
+				node = b3GetLeftChild( node );
+
+				continue;
+			}
+		}
+
+		if ( count == 0 )
+		{
+			break;
+		}
+		node = stack[--count];
+	}
+
+	return planeCount;
+}
+
+void b3QueryMesh( const b3Mesh* mesh, b3AABB bounds, b3MeshQueryFcn* fcn, void* context )
+{
+	b3Vec3 meshScale = mesh->scale;
+	bool ccw = meshScale.x * meshScale.y * meshScale.z > 0.0f;
+
+	// Scale may have reflection so min/max may become invalid when unscaled
+	b3V32 scale = b3LoadV( &meshScale.x );
+	b3V32 invScale = b3DivV( b3_oneV, scale );
+	b3V32 temp1 = b3MulV( invScale, b3LoadV( &bounds.lowerBound.x ) );
+	b3V32 temp2 = b3MulV( invScale, b3LoadV( &bounds.upperBound.x ) );
+	b3V32 invScaledBoundsMin = b3MinV( temp1, temp2 );
+	b3V32 invScaledBoundsMax = b3MaxV( temp1, temp2 );
+	b3V32 invScaledBoundsCenter = b3MulV( b3_halfV, b3AddV( invScaledBoundsMin, invScaledBoundsMax ) );
+	b3V32 invScaledBoundsExtent = b3SubV( invScaledBoundsMax, invScaledBoundsCenter );
+
+	const b3MeshData* data = mesh->data;
+
+	int count = 0;
+	const b3MeshNode* stack[B3_MESH_STACK_SIZE];
+	const b3MeshNode* node = b3GetRoot( data );
+	const b3MeshTriangle* triangles = b3GetMeshTriangles( data );
+	const b3Vec3* vertices = b3GetMeshVertices( data );
+
+	// Test node overlap in unscaled space
+	if ( b3TestBoundsOverlap( b3LoadV( &node->lowerBound.x ), b3LoadV( &node->upperBound.x ), invScaledBoundsMin,
+							  invScaledBoundsMax ) == false )
+	{
+		return;
+	}
+
+	while ( true )
+	{
+		if ( b3IsLeaf( node ) )
+		{
+			int triangleCount = node->data.asLeaf.triangleCount;
+			int triangleOffset = node->triangleOffset;
+
+			for ( int index = 0; index < triangleCount; ++index )
+			{
+				int triangleIndex = triangleOffset + index;
+				b3MeshTriangle triangle = triangles[triangleIndex];
+
+				b3Vec3 vertex1 = vertices[triangle.index1];
+				b3Vec3 vertex2 = vertices[triangle.index2];
+				b3Vec3 vertex3 = vertices[triangle.index3];
+				b3V32 v1 = b3LoadV( &vertex1.x );
+				b3V32 v2 = b3LoadV( &vertex2.x );
+				b3V32 v3 = b3LoadV( &vertex3.x );
+
+				// Perform triangle overlap test in unscaled space.
+				// todo it is possible that some margins are getting scaled
+				if ( b3TestBoundsTriangleOverlap( invScaledBoundsCenter, invScaledBoundsExtent, v1, v2, v3 ) )
+				{
+					b3Vec3 a = b3Mul( meshScale, vertex1 );
+					b3Vec3 b, c;
+					if ( ccw )
+					{
+						b = b3Mul( meshScale, vertex2 );
+						c = b3Mul( meshScale, vertex3 );
+					}
+					else
+					{
+						b = b3Mul( meshScale, vertex3 );
+						c = b3Mul( meshScale, vertex2 );
+					}
+
+					bool result = fcn( a, b, c, triangleIndex, context );
+					if ( result == false )
+					{
+						return;
+					}
+				}
+			}
+		}
+		else
+		{
+			const b3MeshNode* leftChild = b3GetLeftChild( node );
+			const b3MeshNode* rightChild = b3GetRightChild( node );
+
+			bool overlapLeft =
+				b3TestBoundsOverlap( b3LoadV( &leftChild->lowerBound.x ), b3LoadV( &leftChild->upperBound.x ),
+									 invScaledBoundsMin, invScaledBoundsMax );
+			bool overlapRight =
+				b3TestBoundsOverlap( b3LoadV( &rightChild->lowerBound.x ), b3LoadV( &rightChild->upperBound.x ),
+									 invScaledBoundsMin, invScaledBoundsMax );
+
+			if ( overlapLeft )
+			{
+				if ( overlapRight )
+				{
+					B3_ASSERT( count <= B3_MESH_STACK_SIZE - 1 );
+					stack[count++] = rightChild;
+				}
+
+				node = leftChild;
+				continue;
+			}
+
+			if ( overlapRight )
+			{
+				node = rightChild;
+				continue;
+			}
+		}
+
+		if ( count == 0 )
+		{
+			break;
+		}
+		node = stack[--count];
+	}
+}

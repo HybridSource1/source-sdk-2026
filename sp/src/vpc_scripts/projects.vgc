@@ -66,6 +66,11 @@ $Project "phonemeextractor"
 	"utils\phonemeextractor\phonemeextractor.vpc" [$WIN32 && !($VS2015||$VS2017||$VS2019||$VS2022)] // Not currently working with newer toolsets; may be fixable with modification
 }
 
+$Project "vphysics_box3d"
+{
+	"vphysics_box3d\vphysics_box3d.vpc" [($WIN32 && ($VS2019||$VS2022)) || $POSIX] // Box3D is C17: needs the VS2019/VS2022 toolset (newer_vs_toolsets.vpc) or GCC 8+
+}
+
 $Project "raytrace"
 {
 	"raytrace\raytrace.vpc" [$WIN32||$X360||$POSIX]
