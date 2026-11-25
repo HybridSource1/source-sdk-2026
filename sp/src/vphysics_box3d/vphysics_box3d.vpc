@@ -1,0 +1,843 @@
+//-----------------------------------------------------------------------------
+//	VPHYSICS_BOX3D.VPC
+//
+//	VPhysics backend built on Box3D (https://github.com/erincatto/box3d).
+//	Produces vphysics_box3d.dll / vphysics_box3d.so, a drop-in replacement for
+//	the engine's vphysics module. See vphysics_box3d/README.md.
+//
+//	Box3D is C17, so on Windows this project needs one of Mapbase's newer
+//	toolsets (VS2019 or VS2022, see vpc_scripts/newer_vs_toolsets.vpc) and on
+//	Linux GCC 8 or newer.
+//-----------------------------------------------------------------------------
+
+$Macro SRCDIR		".."
+$Macro OUTBINDIR	"$SRCDIR\..\game\bin"
+$Macro BOX3DDIR		"$SRCDIR\thirdparty\box3d"
+
+$Include "$SRCDIR\vpc_scripts\source_dll_base.vpc"
+
+$Configuration
+{
+	$Compiler
+	{
+		$AdditionalIncludeDirectories		"$BASE;$BOX3DDIR\include;$BOX3DDIR\src;$SRCDIR\public\vphysics"
+		$PreprocessorDefinitions			"$BASE;VPHYSICS_BOX3D"
+
+		// Box3D's geometry and solver assume IEEE floats; keep the release -ffast-math away from them
+		$GCC_ExtraCompilerFlags				"$BASE -fno-fast-math -ffp-contract=off" [$POSIX]
+	}
+}
+
+$Project "vphysics_box3d"
+{
+	$Folder	"Source Files"
+	{
+		$File	"b3vp_collide.cpp"
+		$File	"b3vp_constraints.cpp"
+		$File	"b3vp_controllers.cpp"
+		$File	"b3vp_environment.cpp"
+		$File	"b3vp_interface.cpp"
+		$File	"b3vp_object.cpp"
+		$File	"b3vp_parse.cpp"
+		$File	"b3vp_surfaceprops.cpp"
+	}
+
+	$Folder	"Header Files"
+	{
+		$File	"b3vp_base.h"
+		$File	"b3vp_collide.h"
+		$File	"b3vp_constraints.h"
+		$File	"b3vp_controllers.h"
+		$File	"b3vp_environment.h"
+		$File	"b3vp_object.h"
+		$File	"b3vp_parse.h"
+		$File	"b3vp_surfaceprops.h"
+		$File	"$SRCDIR\public\vphysics_interface.h"
+		$File	"$SRCDIR\public\vcollide_parse.h"
+	}
+
+	$Folder	"Box3D"
+	{
+		$Folder	"Source Files"
+		{
+			$File	"$BOX3DDIR\src\aabb.c"
+			{
+				$Configuration
+				{
+					$Compiler
+					{
+						$CompileAs						"Compile as C Code (/TC)"
+						$FloatingPointModel				"Precise (/fp:precise)"
+						$AdditionalOptions				"$BASE /std:c17 /wd4244 /wd4305 /wd4267 /wd4100" [$WINDOWS]
+						$Create/UsePrecompiledHeader	"Not Using Precompiled Headers"
+					}
+				}
+			}
+			$File	"$BOX3DDIR\src\arena_allocator.c"
+			{
+				$Configuration
+				{
+					$Compiler
+					{
+						$CompileAs						"Compile as C Code (/TC)"
+						$FloatingPointModel				"Precise (/fp:precise)"
+						$AdditionalOptions				"$BASE /std:c17 /wd4244 /wd4305 /wd4267 /wd4100" [$WINDOWS]
+						$Create/UsePrecompiledHeader	"Not Using Precompiled Headers"
+					}
+				}
+			}
+			$File	"$BOX3DDIR\src\bitset.c"
+			{
+				$Configuration
+				{
+					$Compiler
+					{
+						$CompileAs						"Compile as C Code (/TC)"
+						$FloatingPointModel				"Precise (/fp:precise)"
+						$AdditionalOptions				"$BASE /std:c17 /wd4244 /wd4305 /wd4267 /wd4100" [$WINDOWS]
+						$Create/UsePrecompiledHeader	"Not Using Precompiled Headers"
+					}
+				}
+			}
+			$File	"$BOX3DDIR\src\block_allocator.c"
+			{
+				$Configuration
+				{
+					$Compiler
+					{
+						$CompileAs						"Compile as C Code (/TC)"
+						$FloatingPointModel				"Precise (/fp:precise)"
+						$AdditionalOptions				"$BASE /std:c17 /wd4244 /wd4305 /wd4267 /wd4100" [$WINDOWS]
+						$Create/UsePrecompiledHeader	"Not Using Precompiled Headers"
+					}
+				}
+			}
+			$File	"$BOX3DDIR\src\body.c"
+			{
+				$Configuration
+				{
+					$Compiler
+					{
+						$CompileAs						"Compile as C Code (/TC)"
+						$FloatingPointModel				"Precise (/fp:precise)"
+						$AdditionalOptions				"$BASE /std:c17 /wd4244 /wd4305 /wd4267 /wd4100" [$WINDOWS]
+						$Create/UsePrecompiledHeader	"Not Using Precompiled Headers"
+					}
+				}
+			}
+			$File	"$BOX3DDIR\src\broad_phase.c"
+			{
+				$Configuration
+				{
+					$Compiler
+					{
+						$CompileAs						"Compile as C Code (/TC)"
+						$FloatingPointModel				"Precise (/fp:precise)"
+						$AdditionalOptions				"$BASE /std:c17 /wd4244 /wd4305 /wd4267 /wd4100" [$WINDOWS]
+						$Create/UsePrecompiledHeader	"Not Using Precompiled Headers"
+					}
+				}
+			}
+			$File	"$BOX3DDIR\src\capsule.c"
+			{
+				$Configuration
+				{
+					$Compiler
+					{
+						$CompileAs						"Compile as C Code (/TC)"
+						$FloatingPointModel				"Precise (/fp:precise)"
+						$AdditionalOptions				"$BASE /std:c17 /wd4244 /wd4305 /wd4267 /wd4100" [$WINDOWS]
+						$Create/UsePrecompiledHeader	"Not Using Precompiled Headers"
+					}
+				}
+			}
+			$File	"$BOX3DDIR\src\compound.c"
+			{
+				$Configuration
+				{
+					$Compiler
+					{
+						$CompileAs						"Compile as C Code (/TC)"
+						$FloatingPointModel				"Precise (/fp:precise)"
+						$AdditionalOptions				"$BASE /std:c17 /wd4244 /wd4305 /wd4267 /wd4100" [$WINDOWS]
+						$Create/UsePrecompiledHeader	"Not Using Precompiled Headers"
+					}
+				}
+			}
+			$File	"$BOX3DDIR\src\constraint_graph.c"
+			{
+				$Configuration
+				{
+					$Compiler
+					{
+						$CompileAs						"Compile as C Code (/TC)"
+						$FloatingPointModel				"Precise (/fp:precise)"
+						$AdditionalOptions				"$BASE /std:c17 /wd4244 /wd4305 /wd4267 /wd4100" [$WINDOWS]
+						$Create/UsePrecompiledHeader	"Not Using Precompiled Headers"
+					}
+				}
+			}
+			$File	"$BOX3DDIR\src\contact.c"
+			{
+				$Configuration
+				{
+					$Compiler
+					{
+						$CompileAs						"Compile as C Code (/TC)"
+						$FloatingPointModel				"Precise (/fp:precise)"
+						$AdditionalOptions				"$BASE /std:c17 /wd4244 /wd4305 /wd4267 /wd4100" [$WINDOWS]
+						$Create/UsePrecompiledHeader	"Not Using Precompiled Headers"
+					}
+				}
+			}
+			$File	"$BOX3DDIR\src\contact_solver.c"
+			{
+				$Configuration
+				{
+					$Compiler
+					{
+						$CompileAs						"Compile as C Code (/TC)"
+						$FloatingPointModel				"Precise (/fp:precise)"
+						$AdditionalOptions				"$BASE /std:c17 /wd4244 /wd4305 /wd4267 /wd4100" [$WINDOWS]
+						$Create/UsePrecompiledHeader	"Not Using Precompiled Headers"
+					}
+				}
+			}
+			$File	"$BOX3DDIR\src\convex_manifold.c"
+			{
+				$Configuration
+				{
+					$Compiler
+					{
+						$CompileAs						"Compile as C Code (/TC)"
+						$FloatingPointModel				"Precise (/fp:precise)"
+						$AdditionalOptions				"$BASE /std:c17 /wd4244 /wd4305 /wd4267 /wd4100" [$WINDOWS]
+						$Create/UsePrecompiledHeader	"Not Using Precompiled Headers"
+					}
+				}
+			}
+			$File	"$BOX3DDIR\src\core.c"
+			{
+				$Configuration
+				{
+					$Compiler
+					{
+						$CompileAs						"Compile as C Code (/TC)"
+						$FloatingPointModel				"Precise (/fp:precise)"
+						$AdditionalOptions				"$BASE /std:c17 /wd4244 /wd4305 /wd4267 /wd4100" [$WINDOWS]
+						$Create/UsePrecompiledHeader	"Not Using Precompiled Headers"
+					}
+				}
+			}
+			$File	"$BOX3DDIR\src\distance.c"
+			{
+				$Configuration
+				{
+					$Compiler
+					{
+						$CompileAs						"Compile as C Code (/TC)"
+						$FloatingPointModel				"Precise (/fp:precise)"
+						$AdditionalOptions				"$BASE /std:c17 /wd4244 /wd4305 /wd4267 /wd4100" [$WINDOWS]
+						$Create/UsePrecompiledHeader	"Not Using Precompiled Headers"
+					}
+				}
+			}
+			$File	"$BOX3DDIR\src\distance_joint.c"
+			{
+				$Configuration
+				{
+					$Compiler
+					{
+						$CompileAs						"Compile as C Code (/TC)"
+						$FloatingPointModel				"Precise (/fp:precise)"
+						$AdditionalOptions				"$BASE /std:c17 /wd4244 /wd4305 /wd4267 /wd4100" [$WINDOWS]
+						$Create/UsePrecompiledHeader	"Not Using Precompiled Headers"
+					}
+				}
+			}
+			$File	"$BOX3DDIR\src\dynamic_tree.c"
+			{
+				$Configuration
+				{
+					$Compiler
+					{
+						$CompileAs						"Compile as C Code (/TC)"
+						$FloatingPointModel				"Precise (/fp:precise)"
+						$AdditionalOptions				"$BASE /std:c17 /wd4244 /wd4305 /wd4267 /wd4100" [$WINDOWS]
+						$Create/UsePrecompiledHeader	"Not Using Precompiled Headers"
+					}
+				}
+			}
+			$File	"$BOX3DDIR\src\height_field.c"
+			{
+				$Configuration
+				{
+					$Compiler
+					{
+						$CompileAs						"Compile as C Code (/TC)"
+						$FloatingPointModel				"Precise (/fp:precise)"
+						$AdditionalOptions				"$BASE /std:c17 /wd4244 /wd4305 /wd4267 /wd4100" [$WINDOWS]
+						$Create/UsePrecompiledHeader	"Not Using Precompiled Headers"
+					}
+				}
+			}
+			$File	"$BOX3DDIR\src\hull.c"
+			{
+				$Configuration
+				{
+					$Compiler
+					{
+						$CompileAs						"Compile as C Code (/TC)"
+						$FloatingPointModel				"Precise (/fp:precise)"
+						$AdditionalOptions				"$BASE /std:c17 /wd4244 /wd4305 /wd4267 /wd4100" [$WINDOWS]
+						$Create/UsePrecompiledHeader	"Not Using Precompiled Headers"
+					}
+				}
+			}
+			$File	"$BOX3DDIR\src\id_pool.c"
+			{
+				$Configuration
+				{
+					$Compiler
+					{
+						$CompileAs						"Compile as C Code (/TC)"
+						$FloatingPointModel				"Precise (/fp:precise)"
+						$AdditionalOptions				"$BASE /std:c17 /wd4244 /wd4305 /wd4267 /wd4100" [$WINDOWS]
+						$Create/UsePrecompiledHeader	"Not Using Precompiled Headers"
+					}
+				}
+			}
+			$File	"$BOX3DDIR\src\island.c"
+			{
+				$Configuration
+				{
+					$Compiler
+					{
+						$CompileAs						"Compile as C Code (/TC)"
+						$FloatingPointModel				"Precise (/fp:precise)"
+						$AdditionalOptions				"$BASE /std:c17 /wd4244 /wd4305 /wd4267 /wd4100" [$WINDOWS]
+						$Create/UsePrecompiledHeader	"Not Using Precompiled Headers"
+					}
+				}
+			}
+			$File	"$BOX3DDIR\src\joint.c"
+			{
+				$Configuration
+				{
+					$Compiler
+					{
+						$CompileAs						"Compile as C Code (/TC)"
+						$FloatingPointModel				"Precise (/fp:precise)"
+						$AdditionalOptions				"$BASE /std:c17 /wd4244 /wd4305 /wd4267 /wd4100" [$WINDOWS]
+						$Create/UsePrecompiledHeader	"Not Using Precompiled Headers"
+					}
+				}
+			}
+			$File	"$BOX3DDIR\src\manifold.c"
+			{
+				$Configuration
+				{
+					$Compiler
+					{
+						$CompileAs						"Compile as C Code (/TC)"
+						$FloatingPointModel				"Precise (/fp:precise)"
+						$AdditionalOptions				"$BASE /std:c17 /wd4244 /wd4305 /wd4267 /wd4100" [$WINDOWS]
+						$Create/UsePrecompiledHeader	"Not Using Precompiled Headers"
+					}
+				}
+			}
+			$File	"$BOX3DDIR\src\math_functions.c"
+			{
+				$Configuration
+				{
+					$Compiler
+					{
+						$CompileAs						"Compile as C Code (/TC)"
+						$FloatingPointModel				"Precise (/fp:precise)"
+						$AdditionalOptions				"$BASE /std:c17 /wd4244 /wd4305 /wd4267 /wd4100" [$WINDOWS]
+						$Create/UsePrecompiledHeader	"Not Using Precompiled Headers"
+					}
+				}
+			}
+			$File	"$BOX3DDIR\src\mesh.c"
+			{
+				$Configuration
+				{
+					$Compiler
+					{
+						$CompileAs						"Compile as C Code (/TC)"
+						$FloatingPointModel				"Precise (/fp:precise)"
+						$AdditionalOptions				"$BASE /std:c17 /wd4244 /wd4305 /wd4267 /wd4100" [$WINDOWS]
+						$Create/UsePrecompiledHeader	"Not Using Precompiled Headers"
+					}
+				}
+			}
+			$File	"$BOX3DDIR\src\mesh_contact.c"
+			{
+				$Configuration
+				{
+					$Compiler
+					{
+						$CompileAs						"Compile as C Code (/TC)"
+						$FloatingPointModel				"Precise (/fp:precise)"
+						$AdditionalOptions				"$BASE /std:c17 /wd4244 /wd4305 /wd4267 /wd4100" [$WINDOWS]
+						$Create/UsePrecompiledHeader	"Not Using Precompiled Headers"
+					}
+				}
+			}
+			$File	"$BOX3DDIR\src\motion_lock_joint.c"
+			{
+				$Configuration
+				{
+					$Compiler
+					{
+						$CompileAs						"Compile as C Code (/TC)"
+						$FloatingPointModel				"Precise (/fp:precise)"
+						$AdditionalOptions				"$BASE /std:c17 /wd4244 /wd4305 /wd4267 /wd4100" [$WINDOWS]
+						$Create/UsePrecompiledHeader	"Not Using Precompiled Headers"
+					}
+				}
+			}
+			$File	"$BOX3DDIR\src\motor_joint.c"
+			{
+				$Configuration
+				{
+					$Compiler
+					{
+						$CompileAs						"Compile as C Code (/TC)"
+						$FloatingPointModel				"Precise (/fp:precise)"
+						$AdditionalOptions				"$BASE /std:c17 /wd4244 /wd4305 /wd4267 /wd4100" [$WINDOWS]
+						$Create/UsePrecompiledHeader	"Not Using Precompiled Headers"
+					}
+				}
+			}
+			$File	"$BOX3DDIR\src\mover.c"
+			{
+				$Configuration
+				{
+					$Compiler
+					{
+						$CompileAs						"Compile as C Code (/TC)"
+						$FloatingPointModel				"Precise (/fp:precise)"
+						$AdditionalOptions				"$BASE /std:c17 /wd4244 /wd4305 /wd4267 /wd4100" [$WINDOWS]
+						$Create/UsePrecompiledHeader	"Not Using Precompiled Headers"
+					}
+				}
+			}
+			$File	"$BOX3DDIR\src\mover_joint.c"
+			{
+				$Configuration
+				{
+					$Compiler
+					{
+						$CompileAs						"Compile as C Code (/TC)"
+						$FloatingPointModel				"Precise (/fp:precise)"
+						$AdditionalOptions				"$BASE /std:c17 /wd4244 /wd4305 /wd4267 /wd4100" [$WINDOWS]
+						$Create/UsePrecompiledHeader	"Not Using Precompiled Headers"
+					}
+				}
+			}
+			$File	"$BOX3DDIR\src\name_cache.c"
+			{
+				$Configuration
+				{
+					$Compiler
+					{
+						$CompileAs						"Compile as C Code (/TC)"
+						$FloatingPointModel				"Precise (/fp:precise)"
+						$AdditionalOptions				"$BASE /std:c17 /wd4244 /wd4305 /wd4267 /wd4100" [$WINDOWS]
+						$Create/UsePrecompiledHeader	"Not Using Precompiled Headers"
+					}
+				}
+			}
+			$File	"$BOX3DDIR\src\parallel_for.c"
+			{
+				$Configuration
+				{
+					$Compiler
+					{
+						$CompileAs						"Compile as C Code (/TC)"
+						$FloatingPointModel				"Precise (/fp:precise)"
+						$AdditionalOptions				"$BASE /std:c17 /wd4244 /wd4305 /wd4267 /wd4100" [$WINDOWS]
+						$Create/UsePrecompiledHeader	"Not Using Precompiled Headers"
+					}
+				}
+			}
+			$File	"$BOX3DDIR\src\parallel_joint.c"
+			{
+				$Configuration
+				{
+					$Compiler
+					{
+						$CompileAs						"Compile as C Code (/TC)"
+						$FloatingPointModel				"Precise (/fp:precise)"
+						$AdditionalOptions				"$BASE /std:c17 /wd4244 /wd4305 /wd4267 /wd4100" [$WINDOWS]
+						$Create/UsePrecompiledHeader	"Not Using Precompiled Headers"
+					}
+				}
+			}
+			$File	"$BOX3DDIR\src\physics_world.c"
+			{
+				$Configuration
+				{
+					$Compiler
+					{
+						$CompileAs						"Compile as C Code (/TC)"
+						$FloatingPointModel				"Precise (/fp:precise)"
+						$AdditionalOptions				"$BASE /std:c17 /wd4244 /wd4305 /wd4267 /wd4100" [$WINDOWS]
+						$Create/UsePrecompiledHeader	"Not Using Precompiled Headers"
+					}
+				}
+			}
+			$File	"$BOX3DDIR\src\pogo_joint.c"
+			{
+				$Configuration
+				{
+					$Compiler
+					{
+						$CompileAs						"Compile as C Code (/TC)"
+						$FloatingPointModel				"Precise (/fp:precise)"
+						$AdditionalOptions				"$BASE /std:c17 /wd4244 /wd4305 /wd4267 /wd4100" [$WINDOWS]
+						$Create/UsePrecompiledHeader	"Not Using Precompiled Headers"
+					}
+				}
+			}
+			$File	"$BOX3DDIR\src\prismatic_joint.c"
+			{
+				$Configuration
+				{
+					$Compiler
+					{
+						$CompileAs						"Compile as C Code (/TC)"
+						$FloatingPointModel				"Precise (/fp:precise)"
+						$AdditionalOptions				"$BASE /std:c17 /wd4244 /wd4305 /wd4267 /wd4100" [$WINDOWS]
+						$Create/UsePrecompiledHeader	"Not Using Precompiled Headers"
+					}
+				}
+			}
+			$File	"$BOX3DDIR\src\recording.c"
+			{
+				$Configuration
+				{
+					$Compiler
+					{
+						$CompileAs						"Compile as C Code (/TC)"
+						$FloatingPointModel				"Precise (/fp:precise)"
+						$AdditionalOptions				"$BASE /std:c17 /wd4244 /wd4305 /wd4267 /wd4100" [$WINDOWS]
+						$Create/UsePrecompiledHeader	"Not Using Precompiled Headers"
+					}
+				}
+			}
+			$File	"$BOX3DDIR\src\replay.c"
+			{
+				$Configuration
+				{
+					$Compiler
+					{
+						$CompileAs						"Compile as C Code (/TC)"
+						$FloatingPointModel				"Precise (/fp:precise)"
+						$AdditionalOptions				"$BASE /std:c17 /wd4244 /wd4305 /wd4267 /wd4100" [$WINDOWS]
+						$Create/UsePrecompiledHeader	"Not Using Precompiled Headers"
+					}
+				}
+			}
+			$File	"$BOX3DDIR\src\revolute_joint.c"
+			{
+				$Configuration
+				{
+					$Compiler
+					{
+						$CompileAs						"Compile as C Code (/TC)"
+						$FloatingPointModel				"Precise (/fp:precise)"
+						$AdditionalOptions				"$BASE /std:c17 /wd4244 /wd4305 /wd4267 /wd4100" [$WINDOWS]
+						$Create/UsePrecompiledHeader	"Not Using Precompiled Headers"
+					}
+				}
+			}
+			$File	"$BOX3DDIR\src\scheduler.c"
+			{
+				$Configuration
+				{
+					$Compiler
+					{
+						$CompileAs						"Compile as C Code (/TC)"
+						$FloatingPointModel				"Precise (/fp:precise)"
+						$AdditionalOptions				"$BASE /std:c17 /wd4244 /wd4305 /wd4267 /wd4100" [$WINDOWS]
+						$Create/UsePrecompiledHeader	"Not Using Precompiled Headers"
+					}
+				}
+			}
+			$File	"$BOX3DDIR\src\sensor.c"
+			{
+				$Configuration
+				{
+					$Compiler
+					{
+						$CompileAs						"Compile as C Code (/TC)"
+						$FloatingPointModel				"Precise (/fp:precise)"
+						$AdditionalOptions				"$BASE /std:c17 /wd4244 /wd4305 /wd4267 /wd4100" [$WINDOWS]
+						$Create/UsePrecompiledHeader	"Not Using Precompiled Headers"
+					}
+				}
+			}
+			$File	"$BOX3DDIR\src\shape.c"
+			{
+				$Configuration
+				{
+					$Compiler
+					{
+						$CompileAs						"Compile as C Code (/TC)"
+						$FloatingPointModel				"Precise (/fp:precise)"
+						$AdditionalOptions				"$BASE /std:c17 /wd4244 /wd4305 /wd4267 /wd4100" [$WINDOWS]
+						$Create/UsePrecompiledHeader	"Not Using Precompiled Headers"
+					}
+				}
+			}
+			$File	"$BOX3DDIR\src\simd.c"
+			{
+				$Configuration
+				{
+					$Compiler
+					{
+						$CompileAs						"Compile as C Code (/TC)"
+						$FloatingPointModel				"Precise (/fp:precise)"
+						$AdditionalOptions				"$BASE /std:c17 /wd4244 /wd4305 /wd4267 /wd4100" [$WINDOWS]
+						$Create/UsePrecompiledHeader	"Not Using Precompiled Headers"
+					}
+				}
+			}
+			$File	"$BOX3DDIR\src\solver.c"
+			{
+				$Configuration
+				{
+					$Compiler
+					{
+						$CompileAs						"Compile as C Code (/TC)"
+						$FloatingPointModel				"Precise (/fp:precise)"
+						$AdditionalOptions				"$BASE /std:c17 /wd4244 /wd4305 /wd4267 /wd4100" [$WINDOWS]
+						$Create/UsePrecompiledHeader	"Not Using Precompiled Headers"
+					}
+				}
+			}
+			$File	"$BOX3DDIR\src\solver_set.c"
+			{
+				$Configuration
+				{
+					$Compiler
+					{
+						$CompileAs						"Compile as C Code (/TC)"
+						$FloatingPointModel				"Precise (/fp:precise)"
+						$AdditionalOptions				"$BASE /std:c17 /wd4244 /wd4305 /wd4267 /wd4100" [$WINDOWS]
+						$Create/UsePrecompiledHeader	"Not Using Precompiled Headers"
+					}
+				}
+			}
+			$File	"$BOX3DDIR\src\sphere.c"
+			{
+				$Configuration
+				{
+					$Compiler
+					{
+						$CompileAs						"Compile as C Code (/TC)"
+						$FloatingPointModel				"Precise (/fp:precise)"
+						$AdditionalOptions				"$BASE /std:c17 /wd4244 /wd4305 /wd4267 /wd4100" [$WINDOWS]
+						$Create/UsePrecompiledHeader	"Not Using Precompiled Headers"
+					}
+				}
+			}
+			$File	"$BOX3DDIR\src\spherical_joint.c"
+			{
+				$Configuration
+				{
+					$Compiler
+					{
+						$CompileAs						"Compile as C Code (/TC)"
+						$FloatingPointModel				"Precise (/fp:precise)"
+						$AdditionalOptions				"$BASE /std:c17 /wd4244 /wd4305 /wd4267 /wd4100" [$WINDOWS]
+						$Create/UsePrecompiledHeader	"Not Using Precompiled Headers"
+					}
+				}
+			}
+			$File	"$BOX3DDIR\src\table.c"
+			{
+				$Configuration
+				{
+					$Compiler
+					{
+						$CompileAs						"Compile as C Code (/TC)"
+						$FloatingPointModel				"Precise (/fp:precise)"
+						$AdditionalOptions				"$BASE /std:c17 /wd4244 /wd4305 /wd4267 /wd4100" [$WINDOWS]
+						$Create/UsePrecompiledHeader	"Not Using Precompiled Headers"
+					}
+				}
+			}
+			$File	"$BOX3DDIR\src\timer.c"
+			{
+				$Configuration
+				{
+					$Compiler
+					{
+						$CompileAs						"Compile as C Code (/TC)"
+						$FloatingPointModel				"Precise (/fp:precise)"
+						$AdditionalOptions				"$BASE /std:c17 /wd4244 /wd4305 /wd4267 /wd4100" [$WINDOWS]
+						$Create/UsePrecompiledHeader	"Not Using Precompiled Headers"
+					}
+				}
+			}
+			$File	"$BOX3DDIR\src\triangle_manifold.c"
+			{
+				$Configuration
+				{
+					$Compiler
+					{
+						$CompileAs						"Compile as C Code (/TC)"
+						$FloatingPointModel				"Precise (/fp:precise)"
+						$AdditionalOptions				"$BASE /std:c17 /wd4244 /wd4305 /wd4267 /wd4100" [$WINDOWS]
+						$Create/UsePrecompiledHeader	"Not Using Precompiled Headers"
+					}
+				}
+			}
+			$File	"$BOX3DDIR\src\types.c"
+			{
+				$Configuration
+				{
+					$Compiler
+					{
+						$CompileAs						"Compile as C Code (/TC)"
+						$FloatingPointModel				"Precise (/fp:precise)"
+						$AdditionalOptions				"$BASE /std:c17 /wd4244 /wd4305 /wd4267 /wd4100" [$WINDOWS]
+						$Create/UsePrecompiledHeader	"Not Using Precompiled Headers"
+					}
+				}
+			}
+			$File	"$BOX3DDIR\src\weld_joint.c"
+			{
+				$Configuration
+				{
+					$Compiler
+					{
+						$CompileAs						"Compile as C Code (/TC)"
+						$FloatingPointModel				"Precise (/fp:precise)"
+						$AdditionalOptions				"$BASE /std:c17 /wd4244 /wd4305 /wd4267 /wd4100" [$WINDOWS]
+						$Create/UsePrecompiledHeader	"Not Using Precompiled Headers"
+					}
+				}
+			}
+			$File	"$BOX3DDIR\src\wheel_joint.c"
+			{
+				$Configuration
+				{
+					$Compiler
+					{
+						$CompileAs						"Compile as C Code (/TC)"
+						$FloatingPointModel				"Precise (/fp:precise)"
+						$AdditionalOptions				"$BASE /std:c17 /wd4244 /wd4305 /wd4267 /wd4100" [$WINDOWS]
+						$Create/UsePrecompiledHeader	"Not Using Precompiled Headers"
+					}
+				}
+			}
+			$File	"$BOX3DDIR\src\wide4.c"
+			{
+				$Configuration
+				{
+					$Compiler
+					{
+						$CompileAs						"Compile as C Code (/TC)"
+						$FloatingPointModel				"Precise (/fp:precise)"
+						$AdditionalOptions				"$BASE /std:c17 /wd4244 /wd4305 /wd4267 /wd4100" [$WINDOWS]
+						$Create/UsePrecompiledHeader	"Not Using Precompiled Headers"
+					}
+				}
+			}
+			$File	"$BOX3DDIR\src\wide8.c"
+			{
+				$Configuration
+				{
+					$Compiler
+					{
+						$CompileAs						"Compile as C Code (/TC)"
+						$FloatingPointModel				"Precise (/fp:precise)"
+						$AdditionalOptions				"$BASE /std:c17 /wd4244 /wd4305 /wd4267 /wd4100" [$WINDOWS]
+						$Create/UsePrecompiledHeader	"Not Using Precompiled Headers"
+					}
+				}
+			}
+			$File	"$BOX3DDIR\src\world_snapshot.c"
+			{
+				$Configuration
+				{
+					$Compiler
+					{
+						$CompileAs						"Compile as C Code (/TC)"
+						$FloatingPointModel				"Precise (/fp:precise)"
+						$AdditionalOptions				"$BASE /std:c17 /wd4244 /wd4305 /wd4267 /wd4100" [$WINDOWS]
+						$Create/UsePrecompiledHeader	"Not Using Precompiled Headers"
+					}
+				}
+			}
+		}
+
+		$Folder	"Header Files"
+		{
+			$File	"$BOX3DDIR\include\box3d\base.h"
+			$File	"$BOX3DDIR\include\box3d\box3d.h"
+			$File	"$BOX3DDIR\include\box3d\collision.h"
+			$File	"$BOX3DDIR\include\box3d\config.h"
+			$File	"$BOX3DDIR\include\box3d\constants.h"
+			$File	"$BOX3DDIR\include\box3d\id.h"
+			$File	"$BOX3DDIR\include\box3d\math_functions.h"
+			$File	"$BOX3DDIR\include\box3d\types.h"
+			$File	"$BOX3DDIR\src\aabb.h"
+			$File	"$BOX3DDIR\src\algorithm.h"
+			$File	"$BOX3DDIR\src\arena_allocator.h"
+			$File	"$BOX3DDIR\src\bitset.h"
+			$File	"$BOX3DDIR\src\block_allocator.h"
+			$File	"$BOX3DDIR\src\body.h"
+			$File	"$BOX3DDIR\src\broad_phase.h"
+			$File	"$BOX3DDIR\src\compound.h"
+			$File	"$BOX3DDIR\src\constraint_graph.h"
+			$File	"$BOX3DDIR\src\contact.h"
+			$File	"$BOX3DDIR\src\contact_solver.h"
+			$File	"$BOX3DDIR\src\contact_solver_wide.inl"
+			$File	"$BOX3DDIR\src\container.h"
+			$File	"$BOX3DDIR\src\convex_manifold_wide.inl"
+			$File	"$BOX3DDIR\src\core.h"
+			$File	"$BOX3DDIR\src\ctz.h"
+			$File	"$BOX3DDIR\src\dynamic_tree.h"
+			$File	"$BOX3DDIR\src\hull.h"
+			$File	"$BOX3DDIR\src\id_pool.h"
+			$File	"$BOX3DDIR\src\island.h"
+			$File	"$BOX3DDIR\src\joint.h"
+			$File	"$BOX3DDIR\src\manifold.h"
+			$File	"$BOX3DDIR\src\math_internal.h"
+			$File	"$BOX3DDIR\src\name_cache.h"
+			$File	"$BOX3DDIR\src\parallel_for.h"
+			$File	"$BOX3DDIR\src\physics_world.h"
+			$File	"$BOX3DDIR\src\platform.h"
+			$File	"$BOX3DDIR\src\qsort.h"
+			$File	"$BOX3DDIR\src\rapidhash.h"
+			$File	"$BOX3DDIR\src\recording.h"
+			$File	"$BOX3DDIR\src\recording_ops.inl"
+			$File	"$BOX3DDIR\src\replay.h"
+			$File	"$BOX3DDIR\src\scheduler.h"
+			$File	"$BOX3DDIR\src\sensor.h"
+			$File	"$BOX3DDIR\src\shape.h"
+			$File	"$BOX3DDIR\src\simd.h"
+			$File	"$BOX3DDIR\src\simd_avx2.h"
+			$File	"$BOX3DDIR\src\simd_neon.h"
+			$File	"$BOX3DDIR\src\simd_scalar.h"
+			$File	"$BOX3DDIR\src\simd_sse2.h"
+			$File	"$BOX3DDIR\src\simd_wide.h"
+			$File	"$BOX3DDIR\src\solver.h"
+			$File	"$BOX3DDIR\src\solver_set.h"
+			$File	"$BOX3DDIR\src\table.h"
+			$File	"$BOX3DDIR\src\verstable.h"
+			$File	"$BOX3DDIR\src\world_snapshot.h"
+		}
+	}
+
+	$Folder	"Link Libraries"
+	{
+		$Lib	mathlib
+	}
+}

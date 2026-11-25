@@ -48,6 +48,9 @@ else
 endif
 DEFINES += -DVPROF_LEVEL=1 -DGNUC -DNO_HOOK_MALLOC -DNO_MALLOC_OVERRIDE -D_GLIBCXX_USE_CXX11_ABI=0
 LDFLAGS = $(CFLAGS) $(GCC_ExtraLinkerFlags) $(OptimizerLevel) -fuse-ld=gold
+# Mapbase: plain C sources (.c) are compiled with $(CC) $(CFLAGS) $(CONLYFLAGS) instead of as C++
+CONLYFLAGS ?= -std=gnu17
+CXXONLYFLAGS = -fabi-compat-version=% -fabi-version=% -Wno-reorder -Wno-invalid-offsetof -Wno-narrowing -Wno-c++11-narrowing
 GENDEP_CXXFLAGS = -MD -MP -MF $(@:.o=.P) 
 MAP_FLAGS =
 Srv_GAMEOUTPUTFILE = 
@@ -324,7 +327,7 @@ else
 		$(QUIET_PREFIX) \
 		echo "---- $(lastword $(subst /, ,$<)) ----";\
 		mkdir -p $(OBJ_DIR) && \
-		$(CXX) $(CXXFLAGS) $(GENDEP_CXXFLAGS) -o $@ -c $<
+		$(if $(filter %.c,$<),$(CC) $(filter-out $(CXXONLYFLAGS),$(CFLAGS)) $(CONLYFLAGS),$(CXX) $(CXXFLAGS)) $(GENDEP_CXXFLAGS) -o $@ -c $<
 endif
 
 ifneq "$(origin VALVE_NO_AUTO_P4)" "undefined"

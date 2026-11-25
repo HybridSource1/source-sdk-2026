@@ -26,6 +26,13 @@ $Group "game"
 	"responserules"
 }
 
+$Group "physics"
+{
+	"mathlib"
+	"tier1"
+	"vphysics_box3d"
+}
+
 $Group "shaderdlls"
 {
 	"game_shader_dx9"
@@ -58,6 +65,7 @@ $Group "everything"
 	"vbsp"
 	"vgui_controls"
 	"vice"
+	"vphysics_box3d"
 	"vrad_dll"
 	"vrad_launcher"
 	"vscript"
